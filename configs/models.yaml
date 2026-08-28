@@ -1,0 +1,14 @@
+# LLM 模型配置
+# api_key 走 ${环境变量},不要硬编码;后期用户自加模型在这里追加即可
+default: deepseek-chat
+models:
+  - name: deepseek-chat
+    provider: openai_compat
+    base_url: https://api.deepseek.com/v1
+    api_key: ${DEEPSEEK_API_KEY}
+    model: deepseek-chat
+  # - name: qwen-plus
+  #   provider: openai_compat
+  #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  #   api_key: ${DASHSCOPE_API_KEY}
+  #   model: qwen-plus
