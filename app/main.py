@@ -1,19 +1,17 @@
-# 应用入口：
-# 作用：启动 FastAPI 应用，挂载所有路由
+# app/main.py — LLM 对话测试入口（chat 逻辑已拆到 app/chat.py）
+import sys
 
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-
-from api.router_chat import chat_router
+from .config import loader
+from .chat import chat
 
 
-# 生命周期：yield 之前是启动时执行，之后是关闭时执行
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
+def main():
+    name = sys.argv[1] if len(sys.argv) > 1 else None
+    cfg = loader.load_models()
+    reply = chat([{"role": "user", "content": "你好，请用一句话介绍自己"}],
+                 model=name, cfg=cfg)
+    print("AI:", reply)
 
 
-app = FastAPI(lifespan=lifespan)
-
-# 挂载路由：以后新增 router 文件，在这里加一行 include_router
-app.include_router(chat_router)
+if __name__ == "__main__":
+    main()

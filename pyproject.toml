@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
-    "openai>=3.5.0",
+    "openai>=1.40,<2",   # 3.x 走 httpx2/httpcore2,SSE 流关闭有 PoolByteStream bug,先用 1.x 稳定线
     "pydantic>=2.13.4",
     "pyyaml>=6.0.3",
     "uvicorn[standard]>=0.52.4",

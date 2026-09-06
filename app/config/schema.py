@@ -1,28 +1,30 @@
-# 配置模型:定义 models.yaml 的结构,pydantic 校验
-
-from pydantic import BaseModel
-
+import os
+import re
+from pydantic import BaseModel,Field
 
 class ModelConfig(BaseModel):
-    """单个模型的配置"""
-
-    name: str
-    provider: str = "openai_compat"
-    base_url: str
-    api_key: str
-    model: str
+   name:str=Field(description="模型名称")
+   provider: str = "openai_compat"
+   base_url: str = Field(description="模型服务地址")
+   api_key: str = Field(description="模型服务API密钥")
+   model: str
 
 
-class Settings(BaseModel):
-    """models.yaml 顶层结构"""
+class Setting(BaseModel):
+  default:str
+  models: list[ModelConfig] = Field(min_length=1)
+  
 
-    default: str
-    models: list[ModelConfig]
-
-    def get_model(self, name: str | None = None) -> ModelConfig:
-        """按名称取模型配置,不传则取默认模型"""
-        target = name or self.default
-        for m in self.models:
-            if m.name == target:
-                return m
-        raise ValueError(f"模型 {target!r} 未在 models.yaml 中配置")
+  def get_model(self,name:str|None=None)->ModelConfig:
+    #按name取模型配置、default兜底、env覆写key
+    name = name or self.default
+    for model in self.models:
+      if model.name == name:
+       # deepseek-v4-flash -> DEEPSEEK_V4_FLASH_KEY(非字母数字统一换下划线)
+       env_name = f"{re.sub(r'[^A-Za-z0-9]', '_', model.name).upper()}_KEY"
+       env_key = os.environ.get(env_name)
+       if env_key:
+         model.api_key = env_key
+       return model
+    raise KeyError(f"模型 {name} 不存在")
+ 

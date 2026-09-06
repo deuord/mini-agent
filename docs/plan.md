@@ -19,58 +19,93 @@
 
 # 第一版:对话基座
 
-## v1.1 目标
+## v1.1 目标与切片路线
 
-最小可用对话助手:打字下指令 → DeepSeek 流式回复 → 保持上下文 → 前端仿 trae-work/codex 风格。文件/命令/ReAct/文档都暂不做。
+最小可用对话助手:打字下指令 → DeepSeek 流式回复 → 保持上下文。文件/命令/ReAct/文档都暂不做。
+
+**核心原则:先练"流式 + 记忆"两个基本功,会话列表和 UI 是壳,壳最后套。**
+
+切片顺序:
+
+| 切片 | 内容 | 验收 |
+|---|---|---|
+| v1.0 | CLI 流式 + 多轮记忆(**不碰 Web**) | 终端连续对话,追问"刚才我说了什么"能答上 |
+| v1.1 | FastAPI + WebSocket,把 CLI 的逻辑搬上 Web | WS 连上,流式多轮对话 |
+| v1.2 | 会话管理:列表 / 历史 / 新增(CRUD) | 多会话并存、可切换 |
+| v1.3 | 前端 UI(仿 trae-work/codex) | 并入 v2,协议长全后再画 |
+
+v1.3 不单独排期:v2 要加命令确认弹窗、v3 要加工具调用过程展示,现在画 UI 必然返工,等协议长全后和 v2 前端一起做。
+
+**架构纪律(CLI 先行的目的):runner 与传输层无关。** runner 只产出事件流(`AsyncIterator[Event]`),CLI 和 WebSocket 都是它的 renderer:
+
+- runner:追加用户消息 → 调 LLM → `yield` 事件(chunk / done / error;v2 扩 confirm,v3 扩 tool_call / plan)
+- CLI renderer(v1.0):消费事件,打印终端
+- WS renderer(v1.1):消费事件,序列化成 JSON 推送
+- v2 的命令确认在两种 renderer 下分别是 `input("[y/N]")` 和 confirm 消息往返,runner 代码不动
 
 ## v1.2 技术栈
 
-- **后端**:Python 3.12+ / FastAPI / WebSocket
+- **语言**:Python 3.12+
 - **LLM**:OpenAI 兼容协议调 DeepSeek
-- **前端**:Web,仿 trae-work/codex 样式(独立生成,不在本方案展开)
+- **CLI**(v1.0):标准库 asyncio;`rich` 可选(流式 Markdown 渲染,不上也行)
+- **后端**(v1.1 引入):FastAPI / WebSocket。走 WS 不走 SSE——v2 确认流程要服务器主动推 + 客户端回,SSE 单向凑不了
+- **前端**(v1.3,随 v2 做):Web,仿 trae-work/codex 样式(独立生成,不在本方案展开)
 - **依赖管理**:`uv`
 
 ## v1.3 目录结构
+
+v1.0 先建(CLI,无 main.py、无 web/):
 
 ```
 mini-agent/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py                # FastAPI 入口,lifespan,挂载路由
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── routes_chat.py     # POST /api/chat/send,WS /api/chat/stream
-│   │   └── routes_health.py   # GET /api/health
+│   ├── cli.py                # v1.0 入口:终端渲染循环
 │   ├── agent/
 │   │   ├── __init__.py
-│   │   ├── session.py         # Session 内存管理
-│   │   └── runner.py          # (第一版仅透传 LLM,v3 改 ReAct)
+│   │   ├── events.py         # 事件类型(chunk/done/error),runner 与 renderer 的契约
+│   │   ├── session.py        # Session 内存管理
+│   │   └── runner.py         # 核心:收消息 → 调 LLM → yield 事件(禁止 print / WS 调用)
 │   ├── llm/
 │   │   ├── __init__.py
-│   │   ├── base.py            # LLMClient 抽象
-│   │   ├── openai_compat.py   # OpenAI 兼容实现(DeepSeek 走这个)
-│   │   └── factory.py         # 按 yaml 配置生成 client
+│   │   ├── base.py           # LLMClient 抽象
+│   │   ├── openai_compat.py  # OpenAI 兼容实现(DeepSeek 走这个)
+│   │   └── factory.py        # 按 yaml 配置生成 client
 │   ├── config/
 │   │   ├── __init__.py
-│   │   ├── loader.py          # 加载 models.yaml + env 覆写
-│   │   └── schema.py          # pydantic 校验
+│   │   ├── loader.py         # 加载 models.yaml + env 覆写
+│   │   └── schema.py         # pydantic 校验
 │   └── store/
 │       ├── __init__.py
-│       └── session_store.py   # 内存 dict(v2 加 SQLite)
+│       └── session_store.py  # 内存 dict(v2 加 SQLite)
 ├── configs/
 │   └── models.yaml
-├── web/                       # 前端
 ├── docs/plan.md
-├── pyproject.toml
-└── README.md
+└── pyproject.toml
 ```
+
+v1.1 新增:
+
+```
+app/
+├── main.py                # FastAPI 入口,lifespan,挂载路由
+└── api/
+    ├── __init__.py
+    ├── routes_chat.py     # WS /api/chat/stream(v1.2 加建会话 / 列表端点)
+    └── routes_health.py   # GET /api/health
+```
+
+v1.3 新增 `web/`(前端,随 v2 一起做)。
 
 ## v1.4 模块职责
 
 - **config/**:读 `models.yaml`,pydantic 校验,env 覆写 key,`get_settings()` 单例
 - **llm/**:`LLMClient` 抽象(`chat(messages, model, stream) -> AsyncIterator[Chunk]`),OpenAI 兼容实现,factory 路由
+- **agent/events.py**:事件数据类型(chunk / done / error),runner 与 renderer 之间的唯一契约;v2 扩 confirm,v3 扩 tool_call / plan
 - **agent/session.py**:`Session`(messages, session_id, created_at),`SessionStore` 内存 dict + TTL
-- **api/routes_chat.py**:`POST /api/chat/send` 建会话,`WS /api/chat/stream` 流式
+- **agent/runner.py**:**传输无关**。追加用户消息 → 调 LLM → 流式 yield 事件 → assistant 完整回复落回 session。代码里不允许出现 `print` / websocket 调用(v3 在此改 ReAct 循环)
+- **cli.py**(v1.0):stdin 读入 → 调 runner → 消费事件打印(`flush=True` 或 rich)
+- **api/routes_chat.py**(v1.1):WS 收消息 → 调**同一个 runner** → 事件转 JSON 推回
 
 ## v1.5 关键数据结构
 
@@ -95,7 +130,26 @@ class Message(BaseModel):
     content: str
 ```
 
-### WebSocket 消息协议
+### 事件协议(runner → renderer)
+
+v1 三种事件(v2 扩 confirm,v3 扩 tool_call / plan):
+
+```python
+class ChunkEvent(BaseModel):
+    type: Literal["chunk"]
+    content: str
+
+class DoneEvent(BaseModel):
+    type: Literal["done"]
+
+class ErrorEvent(BaseModel):
+    type: Literal["error"]
+    message: str
+```
+
+CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
+
+### WebSocket 消息协议(v1.1)
 
 前端 → 后端:
 ```json
@@ -112,18 +166,39 @@ class Message(BaseModel):
 
 ## v1.6 任务清单
 
-- [ ] 1. 脚手架:`uv init` + FastAPI hello world + 目录结构
-- [ ] 2. 配置:`models.yaml` + pydantic 校验 + env 覆写
-- [ ] 3. LLM 客户端:抽象 + OpenAI 兼容实现(DeepSeek)
-- [ ] 4. Session:内存 store + 创建/读取/追加
-- [ ] 5. WebSocket 路由:收消息 → 调 LLM → 流式推回
-- [ ] 6. 健康检查:`GET /api/health` 返回 LLM 配置可用性
-- [ ] 7. 前端:对话 UI(仿 trae-work/codex),连 WS,渲染流式 token
-- [ ] 8. 联调验收:多轮对话连续
+### v1.0:CLI 流式 + 多轮(本周,不碰 Web)
+
+- [x] 1. 脚手架:`uv init` + 目录结构,`python -m app.cli` 能启动
+- [x] 2. 配置:`models.yaml` + pydantic 校验 + env 覆写(schema.py Setting/ModelConfig + get_model 内 env 覆写;openai 钉 1.x,3.x 的 httpx2/httpcore2 流关闭有 bug)
+- [ ] 3. LLM 客户端:抽象 + OpenAI 兼容实现(DeepSeek),流式 `AsyncIterator[Chunk]`(流式实现已有 chat_stream,抽象留到 v1.1 一起收)
+- [x] 4. Session:Session / SessionStore 内存版,创建 / 读取 / 追加
+- [x] 5. events + runner:收消息 → 调 LLM → yield chunk/done/error,完整回复落回 session
+- [x] 6. CLI 渲染循环:stdin 读入 → runner → 打印事件(runner 里不写 print)
+- [x] 7. 联调验收:终端多轮对话连续
+
+### v1.1:FastAPI + WebSocket
+
+- [ ] 1. FastAPI 脚手架:hello world + lifespan + 挂载路由
+- [ ] 2. WebSocket 路由:收 user_message → 调同一个 runner → 事件转 JSON 推回
+- [ ] 3. 健康检查:`GET /api/health` 返回 LLM 配置可用性
+- [ ] 4. 验收:wscat 或简易测试页连 WS,流式多轮对话
+
+### v1.2:会话管理(CRUD)
+
+- [ ] 1. SessionStore 加 list / get / create
+- [ ] 2. WS 支持指定 / 新建 session_id(必要时加 POST 建会话端点)
+- [ ] 3. 验收:多会话并存,历史可拉取、可切换
+
+### v1.3:前端 UI(并入 v2)
+
+- [ ] 1. 仿 trae-work/codex 对话 UI,连 WS 渲染流式 token
+- [ ] 2. 与 v2 文件面板、命令确认弹窗一并设计实现
 
 ## v1.7 验收
 
-浏览器打开对话窗口 → 输入"你好" → 流式回复 → 追问"刚才我说了什么" → 能答上来。
+- **v1.0(核心验收,CLI 即可)**:终端启动 → 输入"你好" → 流式回复逐字出现 → 追问"刚才我说了什么" → 能答上
+- **v1.1**:wscat / 测试页走 WS,同等多轮流式效果
+- **v1.2**:能新建、切换、列出多个会话,历史消息不丢
 
 ---
 
