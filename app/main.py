@@ -1,17 +1,14 @@
-# app/main.py — LLM 对话测试入口（chat 逻辑已拆到 app/chat.py）
-import sys
+from fastapi import FastAPI
+from app.api.routes_health import router as health_router
+from app.api.routes_chat import router as chat_router
+from app.api.routes_sessions import router as sessions_router
 
-from .config import loader
-from .chat import chat
 
-
-def main():
-    name = sys.argv[1] if len(sys.argv) > 1 else None
-    cfg = loader.load_models()
-    reply = chat([{"role": "user", "content": "你好，请用一句话介绍自己"}],
-                 model=name, cfg=cfg)
-    print("AI:", reply)
-
+app = FastAPI(title="mini-agent")
+app.include_router(health_router)
+app.include_router(chat_router)
+app.include_router(sessions_router)
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)

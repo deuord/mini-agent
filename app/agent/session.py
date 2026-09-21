@@ -43,3 +43,23 @@ class SessionStore:
             return None
         s.append(role,content)
         return s
+
+    def list_sessions(self)->list[dict]:
+        """列出所有活跃会话（摘要）"""
+        now = time.time()
+        out=[]
+        for s in self.sessions.values():
+            if now - s.update_time > self.ttl:
+                continue
+            last = s.messages[-1]["content"][:30] if s.messages else ""
+            out.append({
+                "session_id":s.session_id,
+                "messages":len(s.messages),
+                "preview":last,
+            })
+        return out
+
+    def history(self,session_id:str) -> list[dict]|None:
+        """取某会话的完整历史"""
+        s = self.get(session_id)
+        return s.messages if s else None

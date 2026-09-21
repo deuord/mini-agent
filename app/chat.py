@@ -13,6 +13,7 @@ def chat(messages, model=None, cfg=None):
     client = OpenAI(
         api_key=conf.api_key,
         base_url=conf.base_url,
+        timeout=30,
     )
     start = time.time()
     resp = client.chat.completions.create(

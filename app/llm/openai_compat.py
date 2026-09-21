@@ -11,6 +11,7 @@ async def chat_stream(messages, model=None, cfg=None):
     client = AsyncOpenAI(
         api_key=conf.api_key,
         base_url=conf.base_url,
+        timeout=30,
     )
     stream = None
     try:
