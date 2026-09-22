@@ -398,7 +398,7 @@ class AskUserResult:
 
 CLI 有三个输入源要读 stdin:主循环读对话消息、ask_user 读回答、confirm 读 y/n。**绝不能各开各的 `input()`**——谁抢到算谁的,主消息会被 ask 线程吃掉、confirm 永远读不到。收拢成一个:
 
-- **全局只留一个常驻读线程**:循环 `input()` 读行塞进**唯一一个** `asyncio.Queue`
+- **全局只留一个常驻读线程**:循环 `input()` 读行后**不能直接 `queue.put()`**——`asyncio.Queue` 非线程安全(官方文档明确),外线程直接 put 有不唤醒/竞态风险(表现为偶发输入无响应,非 debug 不报错)。正确姿势:启动读线程前捕获 loop,读线程用 `loop.call_soon_threadsafe(queue.put_nowait, line)` 投递(跨线程投递 asyncio 队列的标准姿势)
 - **主循环从 queue 分发**,按当前状态路由:
   - ask 等待态 → 当作问题的回答
   - confirm 等待态 → 当作 y/n
@@ -426,7 +426,7 @@ for step in range(MAX_STEPS):
             buffer(tool_calls_buf, delta.tool_calls)  # 有工具调用 → 累积,不给用户看
     # 流结束:分片 arguments 拼完整后才 json.loads(见下)
     if tool_calls_buf:
-        messages.append(assistant(tool_calls=tool_calls_buf))  # assistant(带 tool_calls)必须先落 messages,再挂 tool 结果
+        messages.append(assistant(content=content or None, tool_calls=tool_calls_buf))  # content+tool_calls 同条消息:assistant 必须先落 messages 再挂 tool 结果;同轮文本(content)也必须带上,否则模型下一轮看不到自己上轮说的话,上下文永久丢失
         for call in parse(tool_calls_buf):            # 按 index 累积拼接再解析
             # ---- ask_user 特殊拦截：不走 registry.execute ----
             if call.name == "ask_user":
