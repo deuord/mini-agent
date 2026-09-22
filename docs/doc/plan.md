@@ -130,6 +130,8 @@ class Message(BaseModel):
     content: str
 ```
 
+> v2 扩展:role 增加 `"tool"`,assistant 消息需携带 `tool_calls` 字段(见 2.7 第二坑)——v2.0 改 function calling 时一起扩 Message,否则 tool 结果没有合法的载体。
+
 ### 事件协议(runner → renderer)
 
 v1 三种事件(v2 扩 tool_call 事件,confirm / ask_user 走回调不走事件;v3 扩 plan):
@@ -217,7 +219,7 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 | v2.0 | 读文件最小闭环:工具注册 + read_file + function calling + ReAct 循环 | 对话"读一下 a.md" → 循环跑通 |
 | v2.1 | 补文件工具 + 命令确认:write/edit + run_command + confirm | 文件改写、命令确认可用 |
 | v2.2 | 澄清提问:ask_user 工具 + 协议 + prompt | 提问澄清可用(三态+超时) |
-| v2.3 | 多步串联联调 | 三场景 + 多步决策跑通 |
+| v2.3 | 多步串联联调 | 2.9 多步串联场景跑通（三场景需要 v3 工具,留到 v3.3） |
 | v2.4 | 收尾:SQLite 落库 recent_files | 重启后最近访问可查 |
 
 ## 2.2 新增能力
@@ -231,10 +233,10 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 - `read_file(path) -> content`
 - `write_file(path, content)`
 - `edit_file(path, old_str, new_str)` — 精确字符串替换
-- `list_recent_files(limit=20)` — SQLite 查询最近访问
+- `list_recent_files(limit=20)` — 查最近访问(v2.1 内存占位,v2.4 换 SQLite)
 
 ### 命令执行
-- `run_command(cmd, cwd)` — 执行前推前端确认请求，确认后执行
+- `run_command(cmd, cwd)` — 执行前走确认回调(WS 推前端 / CLI 走统一输入通道),确认后执行
 - 超时控制(默认 30s)
 - 工作目录无限制,每次确认兜底
 
@@ -308,7 +310,7 @@ CREATE INDEX idx_recent_files_accessed ON recent_files(accessed_at DESC);
 runner 的事件流是**单向**的(yield 出去),但确认需要用户的答案**回传**给 runner。解法:runner 接收一个 **confirm 回调**,不碰传输层:
 
 ```python
-async def run_turn(session, text, confirm=None, tools=TOOLS):
+async def run_turn(session, text, confirm=None, ask_user=None, tools=TOOLS):
     ...
     ok = await confirm(cmd, cwd) if confirm else False   # run_command 执行前
 ```
@@ -424,6 +426,7 @@ for step in range(MAX_STEPS):
             buffer(tool_calls_buf, delta.tool_calls)  # 有工具调用 → 累积,不给用户看
     # 流结束:分片 arguments 拼完整后才 json.loads(见下)
     if tool_calls_buf:
+        messages.append(assistant(tool_calls=tool_calls_buf))  # assistant(带 tool_calls)必须先落 messages,再挂 tool 结果
         for call in parse(tool_calls_buf):            # 按 index 累积拼接再解析
             # ---- ask_user 特殊拦截：不走 registry.execute ----
             if call.name == "ask_user":
@@ -472,7 +475,7 @@ else:
 - [ ] 5. 系统 prompt:引导 Agent 合理使用 ask_user（先查再问、最多 2-3 个、避免挤牙膏）
 
 ### v2.3:多步串联
-- [ ] 1. 联调:三场景 + 多步串联验收(wscat / 测试页)
+- [ ] 1. 联调:2.9 多步串联验收(wscat / 测试页;三场景需要 v3 工具,留到 v3.3)
 
 ### v2.4:收尾
 - [ ] 1. SQLite 初始化 + recent_files 落库(替换内存占位)
@@ -533,6 +536,7 @@ else:
 - 仿 trae-work/codex 对话 UI,连 WS 渲染流式 token
 - 展示 plan(执行计划)+ tool_call(中间步骤)过程
 - 命令确认弹窗:展示 cmd + cwd,确认/拒绝按钮
+- write/edit 改动 **diff 预览**(4.1 已定:改动可见而非每步确认,v2 不加确认靠这里兜)
 - "我的文件"面板:列出最近访问文件,点击在线查看/编辑
 
 ## 3.3 目录新增
@@ -574,6 +578,7 @@ app/
 - [ ] 2. plan / tool_call 过程展示
 - [ ] 3. 命令确认弹窗 + ask_user 问答 UI
 - [ ] 4. "我的文件"面板:列出最近访问文件,点击在线查看/编辑
+- [ ] 5. write/edit diff 预览(4.1 决策的兜底,v2 不加确认靠它)
 
 ### v3.3:端到端验收
 - [ ] 1. 验收场景串联:三场景端到端跑通
