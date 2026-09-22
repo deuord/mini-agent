@@ -4,22 +4,22 @@
 
 桌面本地任务助手。打字下指令 → LLM 理解 → 自主规划步骤 → 调用工具执行(操作文件、跑命令、处理文档)。
 
-分三个版本迭代,第一版只做对话,第二版加文件+命令,第三版补 ReAct+文档处理打通三个验收场景。后期主线(Go LLM 网关 / ERP agent)另起版本规划,不在本方案展开。
+分三个版本迭代,第一版只做对话,第二版加 ReAct 循环+文件+命令执行,第三版补文档处理打通三个验收场景。后期主线(Go LLM 网关 / ERP agent)另起版本规划,不在本方案展开。
 
 ## 二、版本路线总览
 
 | 版本 | 主题 | 验收场景 |
 |---|---|---|
 | v1 | 对话基座 | 多轮对话,流式回复,session 连续 |
-| v2 | 文件 + 命令 | 对话里让 agent 读写文件、跑命令 |
-| v3 | ReAct + 文档处理 | 整理文件夹 / 统计CSV月度总额 / md转HTML |
+| v2 | ReAct + 文件 + 命令 | agent 自主多步完成任务:读文件→改文件→跑命令 |
+| v3 | 文档处理 + 规划 + 前端 | 整理文件夹 / 统计CSV月度总额 / md转HTML |
 | 后期 | Go 网关 / ERP | 单独规划 |
 
 ---
 
 # 第一版:对话基座
 
-## v1.1 目标与切片路线
+## 1.1 目标与切片路线
 
 最小可用对话助手:打字下指令 → DeepSeek 流式回复 → 保持上下文。文件/命令/ReAct/文档都暂不做。
 
@@ -32,27 +32,27 @@
 | v1.0 | CLI 流式 + 多轮记忆(**不碰 Web**) | 终端连续对话,追问"刚才我说了什么"能答上 |
 | v1.1 | FastAPI + WebSocket,把 CLI 的逻辑搬上 Web | WS 连上,流式多轮对话 |
 | v1.2 | 会话管理:列表 / 历史 / 新增(CRUD) | 多会话并存、可切换 |
-| v1.3 | 前端 UI(仿 trae-work/codex) | 并入 v2,协议长全后再画 |
+| v1.3 | 前端 UI(仿 trae-work/codex) | 并入 v3,协议长全后再画 |
 
-v1.3 不单独排期:v2 要加命令确认弹窗、v3 要加工具调用过程展示,现在画 UI 必然返工,等协议长全后和 v2 前端一起做。
+v1.3 不单独排期:v2 加 confirm + tool_call 协议,v3 加 plan 协议,等协议长全后和 v3 前端一起做,现在画 UI 必然返工。
 
 **架构纪律(CLI 先行的目的):runner 与传输层无关。** runner 只产出事件流(`AsyncIterator[Event]`),CLI 和 WebSocket 都是它的 renderer:
 
-- runner:追加用户消息 → 调 LLM → `yield` 事件(chunk / done / error;v2 扩 confirm,v3 扩 tool_call / plan)
+- runner:追加用户消息 → 调 LLM → `yield` 事件(chunk / done / error;v2 扩 tool_call 事件,confirm / ask_user 走回调不走事件;v3 扩 plan)
 - CLI renderer(v1.0):消费事件,打印终端
 - WS renderer(v1.1):消费事件,序列化成 JSON 推送
-- v2 的命令确认在两种 renderer 下分别是 `input("[y/N]")` 和 confirm 消息往返,runner 代码不动
+- v2 的命令确认在两种 renderer 下分别是统一输入通道读 y/n(见 2.6)和 confirm 消息往返,runner 代码不动
 
-## v1.2 技术栈
+## 1.2 技术栈
 
 - **语言**:Python 3.12+
 - **LLM**:OpenAI 兼容协议调 DeepSeek
 - **CLI**(v1.0):标准库 asyncio;`rich` 可选(流式 Markdown 渲染,不上也行)
 - **后端**(v1.1 引入):FastAPI / WebSocket。走 WS 不走 SSE——v2 确认流程要服务器主动推 + 客户端回,SSE 单向凑不了
-- **前端**(v1.3,随 v2 做):Web,仿 trae-work/codex 样式(独立生成,不在本方案展开)
+- **前端**(v1.3,并入 v3 做):Web,仿 trae-work/codex 样式(独立生成,不在本方案展开)
 - **依赖管理**:`uv`
 
-## v1.3 目录结构
+## 1.3 目录结构
 
 v1.0 先建(CLI,无 main.py、无 web/):
 
@@ -95,19 +95,19 @@ app/
     └── routes_health.py   # GET /api/health
 ```
 
-v1.3 新增 `web/`(前端,随 v2 一起做)。
+v1.3 新增 `web/`(前端,并入 v3 做)。
 
-## v1.4 模块职责
+## 1.4 模块职责
 
 - **config/**:读 `models.yaml`,pydantic 校验,env 覆写 key,`get_settings()` 单例
 - **llm/**:`LLMClient` 抽象(`chat(messages, model, stream) -> AsyncIterator[Chunk]`),OpenAI 兼容实现,factory 路由
-- **agent/events.py**:事件数据类型(chunk / done / error),runner 与 renderer 之间的唯一契约;v2 扩 confirm,v3 扩 tool_call / plan
+- **agent/events.py**:事件数据类型(chunk / done / error),runner 与 renderer 之间的唯一契约;v2 扩 tool_call 事件(confirm / ask_user 走回调不走事件),v3 扩 plan
 - **agent/session.py**:`Session`(messages, session_id, created_at),`SessionStore` 内存 dict + TTL
-- **agent/runner.py**:**传输无关**。追加用户消息 → 调 LLM → 流式 yield 事件 → assistant 完整回复落回 session。代码里不允许出现 `print` / websocket 调用(v3 在此改 ReAct 循环)
+- **agent/runner.py**:**传输无关**。追加用户消息 → 调 LLM → 流式 yield 事件 → assistant 完整回复落回 session。代码里不允许出现 `print` / websocket 调用(v2 改为 ReAct 循环)
 - **cli.py**(v1.0):stdin 读入 → 调 runner → 消费事件打印(`flush=True` 或 rich)
 - **api/routes_chat.py**(v1.1):WS 收消息 → 调**同一个 runner** → 事件转 JSON 推回
 
-## v1.5 关键数据结构
+## 1.5 关键数据结构
 
 ### `configs/models.yaml`
 
@@ -132,7 +132,7 @@ class Message(BaseModel):
 
 ### 事件协议(runner → renderer)
 
-v1 三种事件(v2 扩 confirm,v3 扩 tool_call / plan):
+v1 三种事件(v2 扩 tool_call 事件,confirm / ask_user 走回调不走事件;v3 扩 plan):
 
 ```python
 class ChunkEvent(BaseModel):
@@ -164,7 +164,7 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 {"type": "error", "session_id": "xxx", "message": "..."}
 ```
 
-## v1.6 任务清单
+## 1.6 任务清单
 
 ### v1.0:CLI 流式 + 多轮(本周,不碰 Web)
 
@@ -178,23 +178,23 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 
 ### v1.1:FastAPI + WebSocket
 
-- [ ] 1. FastAPI 脚手架:hello world + lifespan + 挂载路由
-- [ ] 2. WebSocket 路由:收 user_message → 调同一个 runner → 事件转 JSON 推回
-- [ ] 3. 健康检查:`GET /api/health` 返回 LLM 配置可用性
-- [ ] 4. 验收:wscat 或简易测试页连 WS,流式多轮对话
+- [x] 1. FastAPI 脚手架:hello world + lifespan + 挂载路由
+- [x] 2. WebSocket 路由:收 user_message → 调同一个 runner → 事件转 JSON 推回
+- [x] 3. 健康检查:`GET /api/health` 返回 LLM 配置可用性
+- [x] 4. 验收:wscat 或简易测试页连 WS,流式多轮对话
 
 ### v1.2:会话管理(CRUD)
 
-- [ ] 1. SessionStore 加 list / get / create
-- [ ] 2. WS 支持指定 / 新建 session_id(必要时加 POST 建会话端点)
-- [ ] 3. 验收:多会话并存,历史可拉取、可切换
+- [x] 1. SessionStore 加 list / get / create
+- [x] 2. WS 支持指定 / 新建 session_id(必要时加 POST 建会话端点)
+- [x] 3. 验收:多会话并存,历史可拉取、可切换
 
-### v1.3:前端 UI(并入 v2)
+### v1.3:前端 UI(并入 v3)
 
 - [ ] 1. 仿 trae-work/codex 对话 UI,连 WS 渲染流式 token
-- [ ] 2. 与 v2 文件面板、命令确认弹窗一并设计实现
+- [ ] 2. 与文件面板、命令确认弹窗、plan/tool_call 过程展示一并设计实现(见 3.2 ③)
 
-## v1.7 验收
+## 1.7 验收
 
 - **v1.0(核心验收,CLI 即可)**:终端启动 → 输入"你好" → 流式回复逐字出现 → 追问"刚才我说了什么" → 能答上
 - **v1.1**:wscat / 测试页走 WS,同等多轮流式效果
@@ -202,13 +202,30 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 
 ---
 
-# 第二版:文件 + 命令执行
+# 第二版:ReAct + 文件 + 命令执行
 
-## v2.1 目标
+## 2.1 目标
 
-让 agent 能在对话里读写文件、跑命令(带确认)。ReAct 还不上,工具调用先靠 LLM 的 function calling 直连(单步调用,非循环)。
+让 agent 能在对话里读写文件、跑命令(带确认),并且**跑在 ReAct 循环上**:LLM 决策 → 调 tool → 观察结果 → 再决策 → 直到完成,能自主多步干完一件事(读文件 → 改文件 → 跑验证)。
 
-## v2.2 新增能力
+单步版和循环版代码量几乎一样(只差一个 while + max_steps),直接上循环,不留半成品。
+
+切片路线:
+
+| 切片 | 内容 | 验收 |
+|---|---|---|
+| v2.0 | 读文件最小闭环:工具注册 + read_file + function calling + ReAct 循环 | 对话"读一下 a.md" → 循环跑通 |
+| v2.1 | 补文件工具 + 命令确认:write/edit + run_command + confirm | 文件改写、命令确认可用 |
+| v2.2 | 澄清提问:ask_user 工具 + 协议 + prompt | 提问澄清可用(三态+超时) |
+| v2.3 | 多步串联联调 | 三场景 + 多步决策跑通 |
+| v2.4 | 收尾:SQLite 落库 recent_files | 重启后最近访问可查 |
+
+## 2.2 新增能力
+
+### ReAct 主循环
+- `agent/runner.py` 改造:LLM 决策 → 调 tool → 观察结果 → 再决策 → 直到完成
+- 终止条件:LLM 不再返回 tool_calls(给最终回复)或达到 `MAX_STEPS`(硬上限,防死循环,默认 10)
+- 中间步骤(tool_call)实时推前端,可见执行过程
 
 ### 文件工具
 - `read_file(path) -> content`
@@ -217,28 +234,38 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 - `list_recent_files(limit=20)` — SQLite 查询最近访问
 
 ### 命令执行
-- `run_command(cmd, cwd)` — 执行前推前端确认请求,确认后执行
+- `run_command(cmd, cwd)` — 执行前推前端确认请求，确认后执行
 - 超时控制(默认 30s)
 - 工作目录无限制,每次确认兜底
+
+### 澄清提问（ask_user）
+- `ask_user(question, options=None)` — Agent 遇到需求歧义 / 多方案决策 / 缺少关键信息时，主动向用户提问
+- **三态+超时响应**：`answered`（用户给出回答）/ `declined`（用户拒答，Agent 应用默认值继续）/ `cancelled`（用户取消整个任务）/ `timeout`（超时未响应，Agent 自行决策）
+- **超时控制**：可配置（默认 5 分钟），超时后返回 `timeout` 状态，Agent 自行判断用默认值继续或中止
+- **防止滥用**：系统 prompt 限制最多问 2-3 个问题，要求先充分检索上下文再提问，避免挤牙膏式追问
+- 执行路径特殊：与普通工具不同，`ask_user` 不直接执行，由 runner 层拦截后挂起等外部输入
 
 ### 最近访问记录
 - SQLite:`recent_files(id, path, op, accessed_at)`
 - 每次 read/write/edit 自动写一条
 
-## v2.3 目录新增
+## 2.3 目录新增
 
 ```
 app/
+├── agent/
+│   └── runner.py              # 改造:单次调 LLM 改为 ReAct 循环
 ├── tools/
 │   ├── __init__.py
-│   ├── registry.py            # 工具注册中心(v3 ReAct 也用这个)
+│   ├── registry.py            # 工具注册中心(v3 文档工具也用这个)
 │   ├── file.py                # read/write/edit/list_recent
-│   └── shell.py               # run_command(带确认流)
+│   ├── shell.py               # run_command(带确认流)
+│   └── ask_user.py            # 澄清提问工具(runner 层拦截，不直接执行)
 ├── store/
 │   └── db.py                  # SQLite 连接 + 表初始化
 ```
 
-## v2.4 SQLite Schema
+## 2.4 SQLite Schema
 
 ```sql
 CREATE TABLE recent_files (
@@ -250,67 +277,265 @@ CREATE TABLE recent_files (
 CREATE INDEX idx_recent_files_accessed ON recent_files(accessed_at DESC);
 ```
 
-## v2.5 命令确认协议(WebSocket 新增)
+## 2.5 命令确认协议(WebSocket 新增)
 
 后端 → 前端:
 ```json
-{"type": "confirm_request", "session_id": "xxx", "cmd": "ls ~/Documents", "cwd": "/"}
+{"type": "confirm_request", "session_id": "xxx", "confirm_id": "cf_123", "cmd": "ls ~/Documents", "cwd": "/"}
 ```
 
 前端 → 后端:
 ```json
-{"type": "confirm_response", "session_id": "xxx", "approve": true}
+{"type": "confirm_response", "session_id": "xxx", "confirm_id": "cf_123", "approve": true}
 ```
+
+- `confirm_id`：本次确认的唯一标识，响应时带回，防止迟到/错乱的响应污染下一次确认（与 `ask_user` 的 `question_id` 作用一致）
 
 确认后执行,结果走:
 ```json
 {"type": "command_output", "session_id": "xxx", "stdout": "...", "stderr": "...", "exit_code": 0}
 ```
 
-## v2.6 前端新增
+工具执行过程走:
+```json
+{"type": "tool_call", "session_id": "xxx", "step": 1, "name": "read_file", "args": {...}, "result": "..."}
+```
 
-- "我的文件"面板:列出最近访问文件,点击在线查看/编辑
-- 命令确认弹窗:展示 cmd + cwd,确认/拒绝按钮
+> 前端 UI(文件面板 / 确认弹窗 / tool_call 展示)并入 v3,v2 验收用 wscat / 简易测试页完成。
 
-## v2.7 任务清单
+### 确认回传机制(runner 保持传输无关)
 
-- [ ] 1. SQLite 初始化:建表 + 连接池
-- [ ] 2. 工具注册中心:统一 schema(name, description, parameters),转 OpenAI function 定义
-- [ ] 3. 文件工具:read/write/edit/list_recent
-- [ ] 4. 命令工具:run_command + 确认流 + 超时
-- [ ] 5. WebSocket 扩展:confirm_request/response 协议
-- [ ] 6. LLM function calling 接入:把 tools 注册给 DeepSeek,处理 tool_call
-- [ ] 7. 前端:文件面板 + 命令确认弹窗
-- [ ] 8. 联调验收:读文件 / 改文件 / 跑命令 三场景
+runner 的事件流是**单向**的(yield 出去),但确认需要用户的答案**回传**给 runner。解法:runner 接收一个 **confirm 回调**,不碰传输层:
 
-## v2.8 验收
+```python
+async def run_turn(session, text, confirm=None, tools=TOOLS):
+    ...
+    ok = await confirm(cmd, cwd) if confirm else False   # run_command 执行前
+```
 
-- 对话"读一下 /Users/xxx/a.md" → agent 调 read_file → 内容显示
+- CLI 传:走**统一输入通道**——`confirm = lambda cmd, cwd: cli_input.wait_line(prompt=f"执行 {cmd}? [y/N]")`,从全局单 queue 取下一行并解析 y/n,**不直接调 input()**(见 2.6 统一输入通道)。解析规则:只认 y/n(忽略大小写),**非 y/n 输入 → 忽略并重新等待**(比如队列里残留的"继续"不算回答,也不视为 declined——必须等明确 y/n)
+- WS 传:推 `confirm_request`,挂起等 `confirm_response` 返回
+
+runner 仍然不 print、不碰 WS ✅
+
+## 2.6 澄清提问协议（ask_user，WebSocket 新增）
+
+Agent 在 ReAct 循环中遇到需求歧义、多方案选择、缺少关键信息时，调用 `ask_user` 工具主动提问。与普通工具不同，`ask_user` 由 runner 层**特殊拦截**，挂起执行等待用户回复。
+
+后端 → 前端：
+```json
+{
+  "type": "ask_user",
+  "session_id": "xxx",
+  "question_id": "uq_123",
+  "question": "登录功能用哪种方式实现？",
+  "options": ["账号密码", "手机号+验证码", "微信OAuth"],
+  "timeout_seconds": 300
+}
+```
+
+- `question_id`：本次提问的唯一标识，响应时带回，防止串题
+- `options`：可选，建议答案列表。前端展示为按钮，用户可点选或输入自由文本
+- `timeout_seconds`：超时时间（默认 300s / 5 分钟），超时后 runner 自动恢复
+
+前端 → 后端：
+```json
+{
+  "type": "ask_user_response",
+  "session_id": "xxx",
+  "question_id": "uq_123",
+  "status": "answered",
+  "answer": "手机号+验证码"
+}
+```
+
+**三态+超时 `status`**：
+
+| status | 含义 | runner 行为 | Agent 收到的 tool_result |
+|---|---|---|---|
+| `answered` | 用户给出了回答 | 正常继续 | `answer` 字段内容 |
+| `declined` | 用户拒绝回答这个问题 | 继续循环 | `"用户拒绝回答此问题，请基于合理假设继续"` |
+| `cancelled` | 用户取消整个任务 | 终止 ReAct 循环，yield DoneEvent | —（循环直接结束） |
+
+**超时处理**：
+- 超时后 status 自动设为 `timeout`，runner 恢复执行
+- Agent 收到：`"用户超时未响应（已等待 5 分钟），请基于合理假设继续，或中止任务等待用户回来"`
+- Agent 自行判断：低风险的继续、高风险的中止并汇报
+
+**Runner 拦截机制**：
+
+`ask_user` 在注册形式上与普通工具一致（有 schema、能被 LLM 调用），但**执行路径不同**：
+
+```
+普通工具：  LLM 调 tool → registry.execute() → 立即返回结果 → 继续
+ask_user：  LLM 调 tool → runner 检测到 ask_user → 拦截 → 调 ask_user_callback →
+            挂起等回复 → 回复到达 → 作为 tool_result 喂回 → 继续
+```
+
+实现方式：runner 的 ReAct 循环中加一个 `if call.name == "ask_user"` 的分支，不走 `registry.execute()`，改走注入的 `ask_user_callback`。就一个 `if`，不引入额外抽象（当前只有 `ask_user` 一个"需要等用户"的工具，过度抽象是浪费）。
+
+**回调签名**：
+
+```python
+# runner 接收的回调（由 CLI / WS 层注入）
+async def ask_user_callback(
+    question: str,
+    options: list[str] | None = None,
+    timeout: int = 300,
+) -> AskUserResult:
+    ...
+
+# 返回值（三态+超时 + 可选 answer）
+@dataclass
+class AskUserResult:
+    status: Literal["answered", "declined", "cancelled", "timeout"]
+    answer: str | None = None
+```
+
+### 统一输入通道（CLI 全局唯一 stdin 读取者）
+
+CLI 有三个输入源要读 stdin:主循环读对话消息、ask_user 读回答、confirm 读 y/n。**绝不能各开各的 `input()`**——谁抢到算谁的,主消息会被 ask 线程吃掉、confirm 永远读不到。收拢成一个:
+
+- **全局只留一个常驻读线程**:循环 `input()` 读行塞进**唯一一个** `asyncio.Queue`
+- **主循环从 queue 分发**,按当前状态路由:
+  - ask 等待态 → 当作问题的回答
+  - confirm 等待态 → 当作 y/n
+  - 否则 → 当作新的对话消息
+- **语义写明**:ask 挂起期间,**任何输入都算回答**(要发新指令先取消 ask,Claude Code 同款处理)——不存在"挂起时输入别的内容"这个状态
+- 超时:`wait_for(queue.get(), timeout)`,超时只放弃等待,读线程继续活着,不泄漏
+
+- CLI renderer:实现超时,与 WS 行为一致(默认 300s),超时后返回 `timeout` 态,Agent 自行决策
+- WS renderer：推 `ask_user` 消息，在连接上挂起等 `ask_user_response`，同时启动超时计时器（超时是 WS 场景的刚需——用户可能关网页走人）
+
+## 2.7 ReAct 循环伪代码(流式版)
+
+**必须统一流式**(`stream=True`):非流式会丢掉 v1 的打字机效果(体验倒退)。边收边判断:
+
+```python
+for step in range(MAX_STEPS):
+    stream = llm.chat(messages, tools=registry.definitions, stream=True)
+    content, tool_calls_buf = "", {}          # tool_calls 按 index 累积
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.content:
+            content += delta.content
+            yield ChunkEvent(content=delta.content)   # 有文本 → 逐字推给用户
+        if delta.tool_calls:
+            buffer(tool_calls_buf, delta.tool_calls)  # 有工具调用 → 累积,不给用户看
+    # 流结束:分片 arguments 拼完整后才 json.loads(见下)
+    if tool_calls_buf:
+        for call in parse(tool_calls_buf):            # 按 index 累积拼接再解析
+            # ---- ask_user 特殊拦截：不走 registry.execute ----
+            if call.name == "ask_user":
+                result = await _handle_ask_user(call.args)  # 挂起等用户回复
+                if result.status == "cancelled":
+                    yield DoneEvent()                         # 用户取消 → 直接结束
+                    return
+                tool_result = _format_ask_user_result(result)  # answered/declined/timeout
+            else:
+                # 普通工具：正常执行（run_command 先走 confirm 回调）
+                result = registry.execute(call)
+                tool_result = str(result)
+            yield ToolCallEvent(...)
+            messages.append(tool_result)          # 简写!实现必须是 role=tool + tool_call_id 的完整消息,否则 API 400
+    else:
+        messages.append(assistant, content)           # 无 tool_calls → 本轮结束
+        yield DoneEvent(); break
+else:
+    yield ErrorEvent(message="执行步数超限")
+```
+
+**⚠️ 流式 function calling 头号坑**:`tool_calls.arguments`(JSON 参数字符串)是**分片到达**的,必须**按 `index` 累积拼接**完整后再 `json.loads`,不能解析第一个分片。`id` / `name` 只在首片,`arguments` 每片追加。
+
+**⚠️ 第二坑**:观察结果喂回时,伪代码里 `messages.append(tool_result)` 是简写——实际必须构造 `{"role": "tool", "tool_call_id": call.id, "content": ...}` 的完整消息,漏了 `tool_call_id` 会直接 API 400。
+
+## 2.8 任务清单(先最小闭环,再铺开)
+
+### v2.0:读文件最小闭环
+- [ ] 1. 工具注册中心:统一 schema(name, description, parameters),转 OpenAI function 定义
+- [ ] 2. read_file 一个工具够用
+- [ ] 3. LLM function calling 接入:流式处理 tool_calls(按 index 累积拼接 → json.loads)
+- [ ] 4. runner 改造 ReAct 循环:流式 + 多轮决策 + MAX_STEPS 终止 + tool_call 事件
+- [ ] 5. ⭐ 验收闭环:对话"读一下 a.md" → 循环跑通(先证明循环没问题,再铺工具)
+
+### v2.1:文件工具 + 命令确认
+- [ ] 1. write_file / edit_file
+- [ ] 2. 命令工具:run_command + confirm 回调 + 执行超时 30s（**确认等待永不超时**,只等用户明确点 y/n）
+- [ ] 3. WebSocket 扩展:confirm_request/response + tool_call 协议 + confirm_id 防串题
+- [ ] 4. list_recent_files:内存列表占位(SQLite 延后到 v2.4)
+
+### v2.2:澄清提问(ask_user)
+- [ ] 1. ask_user 工具定义 + runner 拦截分支 + ask_user_callback 注入
+- [ ] 2. WebSocket 扩展:ask_user / ask_user_response 消息 + 超时计时器 + question_id 防串题
+- [ ] 3. CLI 统一输入通道:单常驻读线程 + 单 queue + 按状态分发(ask 回答 / confirm y/n / 新消息),主循环和 confirm 都改走它,不许再直接 input()
+- [ ] 4. CLI renderer:ask_user 终端交互 + 超时（wait_for(queue.get(), 300),与 WS 同默认 300s）
+- [ ] 5. 系统 prompt:引导 Agent 合理使用 ask_user（先查再问、最多 2-3 个、避免挤牙膏）
+
+### v2.3:多步串联
+- [ ] 1. 联调:三场景 + 多步串联验收(wscat / 测试页)
+
+### v2.4:收尾
+- [ ] 1. SQLite 初始化 + recent_files 落库(替换内存占位)
+
+> 顺序原则(自己的原则):先跑通核心循环(v2.0)再扩展工具(v2.1)——否则一堆工具写完才发现循环有问题,返工。SQLite 延后(v2.4)减少早期复杂度。
+
+## 2.9 验收
+
+- 对话"读一下 ./a.md"(或 Windows `C:\...\a.md`) → agent 调 read_file → 内容流式显示
 - 对话"把 a.md 里 foo 改成 bar" → agent 调 edit_file → 文件已改
-- 对话"跑一下 ls ~/Documents" → 弹确认 → 执行 → 输出显示
+- 对话"跑一下 ls ~/Documents" → 确认(测试页) → 执行 → 输出显示
+- **ask_user 正常路径**：对话"帮我做个登录功能" → Agent 发现歧义 → 调 ask_user 弹选项 → 用户选"手机号+验证码" → Agent 继续执行
+- **ask_user declined（拒答）**：Agent 提问后用户点"跳过" → status=declined → Agent 基于默认值继续，不停滞
+- **ask_user cancelled（取消任务）**：Agent 提问后用户点"取消任务" → 循环直接终止，回到等待状态
+- **ask_user 超时**：Agent 提问后不操作 → 5 分钟超时 → Agent 收到 timeout 提示 → 自行判断继续或中止
+- **多步串联(ReAct 核心验收)**:对话"读一下 a.md,把 foo 改成 bar,然后跑 python test.py 验证" → agent 连续决策:read_file → edit_file → 确认 → run_command → 报告结果
 
 ---
 
-# 第三版:ReAct + 文档处理
+# 第三版:文档处理 + 规划 + 前端
 
-## v3.1 目标
+## 3.1 目标
 
-打通自主任务执行 + 文档处理,覆盖三个验收场景:整理文件夹、统计CSV月度总额、md转HTML。
+在 v2 的 ReAct 循环上补齐四块,覆盖三个验收场景:整理文件夹、统计CSV月度总额、md转HTML。
 
-## v3.2 新增能力
+① 文档处理工具集 ← 大头
+② 规划能力(planning prompt + plan 事件)
+③ 前端可视化(plan + tool_call 过程展示,v1.3 的前端也在这里做)
+④ 端到端验收(三场景)
 
-### ReAct 主循环
-- `agent/runner.py` 改造:LLM 决策 → 调 tool → 观察结果 → 再决策 → 直到完成
-- 任务规划 prompt 模板(系统提示引导先列步骤)
-- 中间步骤实时推前端(可见思考过程)
+切片路线:
 
-### 文档处理工具
+| 切片 | 内容 | 验收 |
+|---|---|---|
+| v3.0 | 文档处理工具集:CSV / Excel / Word / md_to_html | 各工具单独可用 |
+| v3.1 | 文件工具补充 + 规划能力:move_file / make_dir + plan prompt + plan 事件 | 整理文件夹可规划执行 |
+| v3.2 | 前端可视化:对话 UI + plan/tool_call 展示 + 确认弹窗 + 文件面板 | 前端跑通所有协议 |
+| v3.3 | 端到端验收:三场景串联 | 三场景端到端跑通 |
+
+## 3.2 新增能力
+
+### ① 文档处理工具集
 - `read_csv(path) -> rows` / `summary_csv(path, group_by_col, agg_col, agg_func)` — 月度总额走这个
 - `read_excel(path)` / `write_excel(path, data)`
 - `read_docx(path)` / `write_docx(path, content)`
 - md→HTML:走 `markdown` 库,直接在 file 工具里加 `md_to_html(path)` → 写回 `xxx.html`
 
-## v3.3 目录新增
+### ①b 文件工具补充（整理文件夹场景用）
+- `move_file(src, dst)` — 移动/重命名文件，支持批量（src 可传 glob 模式）
+- `make_dir(path)` — 创建目录（含父目录，等价 `mkdir -p`）
+- 都加在已有的 `tools/file.py` 里，不新建文件
+
+### ② 规划能力
+- 任务规划 prompt 模板(系统提示引导先列步骤再执行)
+- plan 事件推给前端,展示执行计划
+
+### ③ 前端可视化(v1.3 的前端在此完成)
+- 仿 trae-work/codex 对话 UI,连 WS 渲染流式 token
+- 展示 plan(执行计划)+ tool_call(中间步骤)过程
+- 命令确认弹窗:展示 cmd + cwd,确认/拒绝按钮
+- "我的文件"面板:列出最近访问文件,点击在线查看/编辑
+
+## 3.3 目录新增
 
 ```
 app/
@@ -322,44 +547,38 @@ app/
 │       ├── word.py            # read_docx / write_docx
 │       └── markdown.py        # md_to_html
 ├── agent/
-│   ├── react.py               # ReAct 主循环
 │   └── prompts.py             # 规划系统提示模板
+└── web/                       # 前端(原 v1.3,并入这里)
 ```
 
-## v3.4 ReAct 循环伪代码
-
-```
-loop:
-    response = llm.chat(messages, tools=registered_tools)
-    if response.tool_calls:
-        for call in response.tool_calls:
-            result = registry.execute(call.name, call.args)
-            push_to_frontend({type: "tool_call", name, args, result})
-            messages.append(tool_result)
-    else:
-        push_to_frontend({type: "chunk", content: response.content})
-        if response.done: break
-```
-
-## v3.5 WebSocket 新增消息
+## 3.4 WebSocket 新增消息
 
 ```json
-{"type": "tool_call", "session_id": "xxx", "name": "read_csv", "args": {...}, "result": "..."}
 {"type": "plan", "session_id": "xxx", "steps": ["...", "..."]}
 ```
 
-## v3.6 任务清单
+## 3.5 任务清单
 
-- [ ] 1. ReAct 主循环:工具调度 + 多轮决策
-- [ ] 2. 规划 prompt 模板:引导 LLM 先列步骤再执行
-- [ ] 3. CSV 工具:read + summary(按月聚合)
-- [ ] 4. Excel 工具:read + write
-- [ ] 5. Word 工具:read + write
-- [ ] 6. md_to_html 工具:`markdown` 库渲染,写回原目录
-- [ ] 7. 前端:展示 plan + tool_call 中间步骤
-- [ ] 8. 验收场景串联:三场景跑通
+### v3.0:文档处理工具集
+- [ ] 1. CSV 工具:read + summary(按月聚合)
+- [ ] 2. Excel 工具:read + write
+- [ ] 3. Word 工具:read + write
+- [ ] 4. md_to_html 工具:`markdown` 库渲染,写回原目录
 
-## v3.7 验收
+### v3.1:文件工具补充 + 规划能力
+- [ ] 1. 文件工具补充:move_file + make_dir（整理文件夹场景用，加在 tools/file.py）
+- [ ] 2. 规划 prompt 模板 + plan 事件:引导 LLM 先列步骤再执行
+
+### v3.2:前端可视化
+- [ ] 1. 对话 UI:仿 trae-work/codex,连 WS 渲染流式 token(原 v1.3)
+- [ ] 2. plan / tool_call 过程展示
+- [ ] 3. 命令确认弹窗 + ask_user 问答 UI
+- [ ] 4. "我的文件"面板:列出最近访问文件,点击在线查看/编辑
+
+### v3.3:端到端验收
+- [ ] 1. 验收场景串联:三场景端到端跑通
+
+## 3.6 验收
 
 - **整理文件夹**:对话"把 ~/Downloads 里的图片归到一个子目录" → agent 列文件 → 规划 → 调 move → 报告结果
 - **统计CSV月度总额**:对话"统计 sales.csv 每月总额" → agent 调 summary_csv → 表格展示
@@ -379,6 +598,7 @@ loop:
 | 命令执行工作目录 | 任意目录 + 每次弹确认 | trae/codex/cursor 主流做法 |
 | md→HTML 输出 | 写回原目录,`xxx.md` → `xxx.html` | pandoc、VSCode 导出主流 |
 | 文档处理顺序 | CSV → Excel → Word | 验收场景只涉及 CSV+md,其他按需迭代 |
+| write/edit 确认策略 | **v2 不加确认,v3 前端做 diff 预览**(已定) | 主流 Codex/Cursor 是"改动可见"而非每步确认;v2 保持简单 |
 | 最近访问存储 | SQLite 单文件 | 比 JSON 好查询/并发 |
 
 ## 4.2 不做的(划线)
