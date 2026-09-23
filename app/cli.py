@@ -2,6 +2,7 @@
 import asyncio
 from app.agent.runner import run_turn
 from app.store.session_store import SessionStore
+import json
 
 
 async def repl():
@@ -25,6 +26,8 @@ async def repl():
         async for ev in run_turn(session, user_input):
             if ev.type == "chunk":
                 print(ev.content, end="", flush=True)
+            elif ev.type == "tool_call":
+                print(f"\n[调用工具 #{ev.step}] {ev.name} 参数={json.dumps(ev.args, ensure_ascii=False)}")
             elif ev.type == "done":
                 print("\n")
             elif ev.type == "error":

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 
 @dataclass
 class ChunkEvent:
@@ -14,3 +14,11 @@ class DoneEvent:
 class ErrorEvent:
     type:str = "error"
     message:str = ""
+
+@dataclass
+class ToolCallEvent:
+    type:str = "tool_call"
+    step:int = 0
+    name:str = ""
+    args:dict = field(default_factory=dict)
+    result:str = ""
