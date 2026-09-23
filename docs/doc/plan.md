@@ -68,19 +68,19 @@ mini-agent/
 │   │   └── runner.py         # 核心:收消息 → 调 LLM → yield 事件(禁止 print / WS 调用)
 │   ├── llm/
 │   │   ├── __init__.py
-│   │   ├── base.py           # LLMClient 抽象
-│   │   ├── openai_compat.py  # OpenAI 兼容实现(DeepSeek 走这个)
-│   │   └── factory.py        # 按 yaml 配置生成 client
+│   │   └── openai_compat.py  # OpenAI 兼容流式调用(DeepSeek 走这个),直读 config;不设 base 抽象/factory(单 provider,避免过度设计)
 │   ├── config/
 │   │   ├── __init__.py
 │   │   ├── loader.py         # 加载 models.yaml + env 覆写
 │   │   └── schema.py         # pydantic 校验
 │   └── store/
 │       ├── __init__.py
-│       └── session_store.py  # 内存 dict(v2 加 SQLite)
+│       └── session_store.py  # SessionStore:内存 dict+TTL(v2.4 换 SQLite)
 ├── configs/
 │   └── models.yaml
-├── docs/plan.md
+├── docs/
+│   ├── commit/               # 提交记录
+│   └── doc/plan.md           # 本文档
 └── pyproject.toml
 ```
 
@@ -97,15 +97,19 @@ app/
 
 v1.3 新增 `web/`(前端,并入 v3 做)。
 
+v2.0 新增 `app/tools/`(registry 注册中心 + 各工具模块,每个工具一个文件、自带 register)和 `app/obs.py`(观测埋点,见 1.6)、`logs/metrics.jsonl`(指标日志,gitignore)。仓库根的 `test_*.py` 为联调临时脚本,验收后不纳入结构。
+
 ## 1.4 模块职责
 
 - **config/**:读 `models.yaml`,pydantic 校验,env 覆写 key,`get_settings()` 单例
-- **llm/**:`LLMClient` 抽象(`chat(messages, model, stream) -> AsyncIterator[Chunk]`),OpenAI 兼容实现,factory 路由
+- **store/session_store.py**:`SessionStore` 内存 dict + TTL;v2.4 SQLite 替换实现,对外接口不变
+- **llm/**:`openai_compat.chat_stream(messages, model, cfg) -> AsyncIterator[str]` 直读 config,不设抽象层/factory(单 provider)
 - **agent/events.py**:事件数据类型(chunk / done / error),runner 与 renderer 之间的唯一契约;v2 扩 tool_call 事件(confirm / ask_user 走回调不走事件),v3 扩 plan
-- **agent/session.py**:`Session`(messages, session_id, created_at),`SessionStore` 内存 dict + TTL
+- **agent/session.py**:`Session` 数据结构(messages, session_id, created_at);存储逻辑在 `store/session_store.py`,单例放 `agent/store.py`(被 api 路由引用)
 - **agent/runner.py**:**传输无关**。追加用户消息 → 调 LLM → 流式 yield 事件 → assistant 完整回复落回 session。代码里不允许出现 `print` / websocket 调用(v2 改为 ReAct 循环)
 - **cli.py**(v1.0):stdin 读入 → 调 runner → 消费事件打印(`flush=True` 或 rich)
 - **api/routes_chat.py**(v1.1):WS 收消息 → 调**同一个 runner** → 事件转 JSON 推回
+- **obs.py**(v2.0):`log_event(type, **fields)` 写 `logs/metrics.jsonl` + 内存计数,`/api/metrics` 聚合(见 1.6)
 
 ## 1.5 关键数据结构
 
@@ -166,7 +170,24 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 {"type": "error", "session_id": "xxx", "message": "..."}
 ```
 
-## 1.6 任务清单
+## 1.6 可观测性（全程贯穿）
+
+一个模块 `app/obs.py`,三个接入层,数据落 `logs/metrics.jsonl`(每行一条 JSON),内存计数器供 `/api/metrics` 聚合。runner 禁 print,但允许调 `obs.log_event()`——观测不违反传输无关纪律。
+
+埋点分三层:
+
+| 层 | 记什么 | 在哪埋 | 接入切片 |
+|---|---|---|---|
+| LLM 调用 | model、延迟、prompt/completion tokens | `openai_compat.chat_stream` 流结束时 | v2.0 |
+| 回合(一次用户输入到 done) | session_id、耗时、步数、tool_call 次数/成败、错误 | `runner.run_turn` | v2.0 |
+| 人机交互 | confirm 等待时长 + approved/rejected;ask_user 等待时长 + answered/declined/cancelled/timeout 分布 | confirm / ask_user 回调 | v2.1 / v2.2 |
+
+- **token 计数**:OpenAI 协议流式默认不回 usage,要带 `stream_options={"include_usage": True}`,末尾 chunk 里取(DeepSeek 兼容)
+- **聚合端点** `GET /api/metrics`:会话数、回合数、tool_call 数、错误数、LLM 累计 token、平均延迟(v2.4 接入)
+- **v1 缺口**:chat_stream 目前没有耗时/token 记录——`chat.py` 里那行 `[llm] 耗时|tokens` print 是死代码,v2.0 修 chat_stream(tools/delta/usage 残局)时一并补上
+- **调试收益**:ReAct 多步出问题时,jsonl 直接 grep 出每步耗时与成败;**简历表述**:"设计 LLM 应用全链路可观测性:结构化指标日志 + 聚合端点,量化 token 成本、回合延迟、工具调用成功率、人机交互等待时长"
+
+## 1.7 任务清单
 
 ### v1.0:CLI 流式 + 多轮(本周,不碰 Web)
 
@@ -196,7 +217,7 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 - [ ] 1. 仿 trae-work/codex 对话 UI,连 WS 渲染流式 token
 - [ ] 2. 与文件面板、命令确认弹窗、plan/tool_call 过程展示一并设计实现(见 3.2 ③)
 
-## 1.7 验收
+## 1.8 验收
 
 - **v1.0(核心验收,CLI 即可)**:终端启动 → 输入"你好" → 流式回复逐字出现 → 追问"刚才我说了什么" → 能答上
 - **v1.1**:wscat / 测试页走 WS,同等多轮流式效果
@@ -216,11 +237,11 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 
 | 切片 | 内容 | 验收 |
 |---|---|---|
-| v2.0 | 读文件最小闭环:工具注册 + read_file + function calling + ReAct 循环 | 对话"读一下 a.md" → 循环跑通 |
+| v2.0 | 读文件最小闭环:工具注册 + read_file + function calling + ReAct 循环 + 观测埋点 | 对话"读一下 a.md" → 循环跑通 |
 | v2.1 | 补文件工具 + 命令确认:write/edit + run_command + confirm | 文件改写、命令确认可用 |
 | v2.2 | 澄清提问:ask_user 工具 + 协议 + prompt | 提问澄清可用(三态+超时) |
 | v2.3 | 多步串联联调 | 2.9 多步串联场景跑通（三场景需要 v3 工具,留到 v3.3） |
-| v2.4 | 收尾:SQLite 落库 recent_files | 重启后最近访问可查 |
+| v2.4 | 收尾:SQLite 落库 recent_files + `/api/metrics` 聚合端点 | 重启后最近访问可查;/api/metrics 有数据 |
 
 ## 2.2 新增能力
 
@@ -459,13 +480,15 @@ else:
 - [ ] 2. read_file 一个工具够用
 - [ ] 3. LLM function calling 接入:流式处理 tool_calls(按 index 累积拼接 → json.loads)
 - [ ] 4. runner 改造 ReAct 循环:流式 + 多轮决策 + MAX_STEPS 终止 + tool_call 事件
-- [ ] 5. ⭐ 验收闭环:对话"读一下 a.md" → 循环跑通(先证明循环没问题,再铺工具)
+- [ ] 5. 观测埋点:`app/obs.py`(log_event → logs/metrics.jsonl + 内存计数) + chat_stream 记 LLM 延迟/token(顺带修 tools 参数 / delta yield / usage 拿取残局,见 1.6) + 回合耗时埋点
+- [ ] 6. ⭐ 验收闭环:对话"读一下 a.md" → 循环跑通(先证明循环没问题,再铺工具)
 
 ### v2.1:文件工具 + 命令确认
 - [ ] 1. write_file / edit_file
 - [ ] 2. 命令工具:run_command + confirm 回调 + 执行超时 30s（**确认等待永不超时**,只等用户明确点 y/n）
 - [ ] 3. WebSocket 扩展:confirm_request/response + tool_call 协议 + confirm_id 防串题
 - [ ] 4. list_recent_files:内存列表占位(SQLite 延后到 v2.4)
+- [ ] 5. confirm 交互埋点:等待时长 + approved/rejected 结果记入 metrics(见 1.6)
 
 ### v2.2:澄清提问(ask_user)
 - [ ] 1. ask_user 工具定义 + runner 拦截分支 + ask_user_callback 注入
@@ -473,12 +496,14 @@ else:
 - [ ] 3. CLI 统一输入通道:单常驻读线程 + 单 queue + 按状态分发(ask 回答 / confirm y/n / 新消息),主循环和 confirm 都改走它,不许再直接 input()
 - [ ] 4. CLI renderer:ask_user 终端交互 + 超时（wait_for(queue.get(), 300),与 WS 同默认 300s）
 - [ ] 5. 系统 prompt:引导 Agent 合理使用 ask_user（先查再问、最多 2-3 个、避免挤牙膏）
+- [ ] 6. ask_user 交互埋点:等待时长 + answered/declined/cancelled/timeout 分布记入 metrics(见 1.6)
 
 ### v2.3:多步串联
 - [ ] 1. 联调:2.9 多步串联验收(wscat / 测试页;三场景需要 v3 工具,留到 v3.3)
 
 ### v2.4:收尾
 - [ ] 1. SQLite 初始化 + recent_files 落库(替换内存占位)
+- [ ] 2. `GET /api/metrics`:聚合内存计数(会话数、回合数、tool_call 数、错误数、LLM 累计 token、平均延迟) + jsonl 落地检查
 
 > 顺序原则(自己的原则):先跑通核心循环(v2.0)再扩展工具(v2.1)——否则一堆工具写完才发现循环有问题,返工。SQLite 延后(v2.4)减少早期复杂度。
 
@@ -492,6 +517,7 @@ else:
 - **ask_user cancelled（取消任务）**：Agent 提问后用户点"取消任务" → 循环直接终止，回到等待状态
 - **ask_user 超时**：Agent 提问后不操作 → 5 分钟超时 → Agent 收到 timeout 提示 → 自行判断继续或中止
 - **多步串联(ReAct 核心验收)**:对话"读一下 a.md,把 foo 改成 bar,然后跑 python test.py 验证" → agent 连续决策:read_file → edit_file → 确认 → run_command → 报告结果
+- **观测验收**:每轮对话后 `logs/metrics.jsonl` 有 llm / turn 记录(延迟、token、步数);工具调用与 confirm/ask_user 有对应埋点;`curl /api/metrics` 返回聚合数据
 
 ---
 

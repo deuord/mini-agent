@@ -1,7 +1,7 @@
 # app/cli.py — v1.0 入口(先跑通启动)
 import asyncio
 from app.agent.runner import run_turn
-from app.agent.session import SessionStore
+from app.store.session_store import SessionStore
 
 
 async def repl():

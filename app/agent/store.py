@@ -1,3 +1,3 @@
-from app.agent.session import SessionStore
+from app.store.session_store import SessionStore
 
 store = SessionStore()
