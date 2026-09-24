@@ -184,7 +184,7 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 
 - **token 计数**:OpenAI 协议流式默认不回 usage,要带 `stream_options={"include_usage": True}`,末尾 chunk 里取(DeepSeek 兼容)
 - **聚合端点** `GET /api/metrics`:会话数、回合数、tool_call 数、错误数、LLM 累计 token、平均延迟(v2.4 接入)
-- **v1 缺口**:chat_stream 目前没有耗时/token 记录——`chat.py` 里那行 `[llm] 耗时|tokens` print 是死代码,v2.0 修 chat_stream(tools/delta/usage 残局)时一并补上
+- **v1 缺口(已在 v2.0 补上)**:chat_stream 的耗时/token 记录已接入 log_event(tools 参数 / delta yield / usage 拿取残局同步修完);遗留项是 `app/chat.py`(非流式 + 自带 print)已无任何引用,属死代码,待清理
 - **调试收益**:ReAct 多步出问题时,jsonl 直接 grep 出每步耗时与成败;**简历表述**:"设计 LLM 应用全链路可观测性:结构化指标日志 + 聚合端点,量化 token 成本、回合延迟、工具调用成功率、人机交互等待时长"
 
 ## 1.7 任务清单
@@ -237,7 +237,7 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 
 | 切片 | 内容 | 验收 |
 |---|---|---|
-| v2.0 | 读文件最小闭环:工具注册 + read_file + function calling + ReAct 循环 + 观测埋点 | 对话"读一下 a.md" → 循环跑通 |
+| v2.0 | 读文件最小闭环:工具注册 + read_file + function calling + ReAct 循环 + 观测埋点 | 对话"读一下 ./docs/doc/plan.md" → 循环跑通 |
 | v2.1 | 补文件工具 + 命令确认:write/edit + run_command + confirm | 文件改写、命令确认可用 |
 | v2.2 | 澄清提问:ask_user 工具 + 协议 + prompt | 提问澄清可用(三态+超时) |
 | v2.3 | 多步串联联调 | 2.9 多步串联场景跑通（三场景需要 v3 工具,留到 v3.3） |
@@ -247,7 +247,7 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 
 ### ReAct 主循环
 - `agent/runner.py` 改造:LLM 决策 → 调 tool → 观察结果 → 再决策 → 直到完成
-- 终止条件:LLM 不再返回 tool_calls(给最终回复)或达到 `MAX_STEPS`(硬上限,防死循环,默认 10)
+- 终止条件:LLM 不再返回 tool_calls(给最终回复)或达到 `MAX_STEPS`(硬上限,防死循环,默认 6)
 - 中间步骤(tool_call)实时推前端,可见执行过程
 
 ### 文件工具
@@ -476,12 +476,12 @@ else:
 ## 2.8 任务清单(先最小闭环,再铺开)
 
 ### v2.0:读文件最小闭环
-- [ ] 1. 工具注册中心:统一 schema(name, description, parameters),转 OpenAI function 定义
-- [ ] 2. read_file 一个工具够用
-- [ ] 3. LLM function calling 接入:流式处理 tool_calls(按 index 累积拼接 → json.loads)
-- [ ] 4. runner 改造 ReAct 循环:流式 + 多轮决策 + MAX_STEPS 终止 + tool_call 事件
-- [ ] 5. 观测埋点:`app/obs.py`(log_event → logs/metrics.jsonl + 内存计数) + chat_stream 记 LLM 延迟/token(顺带修 tools 参数 / delta yield / usage 拿取残局,见 1.6) + 回合耗时埋点
-- [ ] 6. ⭐ 验收闭环:对话"读一下 a.md" → 循环跑通(先证明循环没问题,再铺工具)
+- [x] 1. 工具注册中心:统一 schema(name, description, parameters),转 OpenAI function 定义(`tools/registry.py`,`definitions` + `execute`)
+- [x] 2. read_file 一个工具够用(`tools/file.py`,自带 register)
+- [x] 3. LLM function calling 接入:流式处理 tool_calls(按 index 累积拼接 → json.loads)(`tools/calls.py`,buffer 只累积 / parse 流结束后解析,职责分离;openai_compat 加 `tools` 参数)
+- [x] 4. runner 改造 ReAct 循环:流式 + 多轮决策 + MAX_STEPS 终止 + tool_call 事件(`MAX_STEPS=6`;assistant(content+tool_calls) 与 role=tool 结果成对落历史;tool 执行异常喂回模型自纠)
+- [x] 5. 观测埋点:`app/obs.py`(log_event → logs/metrics.jsonl + 内存计数) + chat_stream 记 LLM 延迟/token(顺带修 tools 参数 / delta yield / usage 拿取残局,见 1.6) + 回合耗时埋点(usage 在末尾空 choices 的 chunk 上,需先接住再 continue)
+- [x] 6. ⭐ 验收闭环:对话"读一下 a.md" → 循环跑通(先证明循环没问题,再铺工具)(实测 metrics:steps=2 / tools=1 / tools_ok=1)
 
 ### v2.1:文件工具 + 命令确认
 - [ ] 1. write_file / edit_file
@@ -509,8 +509,8 @@ else:
 
 ## 2.9 验收
 
-- 对话"读一下 ./a.md"(或 Windows `C:\...\a.md`) → agent 调 read_file → 内容流式显示
-- 对话"把 a.md 里 foo 改成 bar" → agent 调 edit_file → 文件已改
+- 对话"读一下 ./docs/doc/plan.md"(或 Windows `C:\...\plan.md`) → agent 调 read_file → 内容流式显示
+- 对话"把 plan.md 里 foo 改成 bar" → agent 调 edit_file → 文件已改
 - 对话"跑一下 ls ~/Documents" → 确认(测试页) → 执行 → 输出显示
 - **ask_user 正常路径**：对话"帮我做个登录功能" → Agent 发现歧义 → 调 ask_user 弹选项 → 用户选"手机号+验证码" → Agent 继续执行
 - **ask_user declined（拒答）**：Agent 提问后用户点"跳过" → status=declined → Agent 基于默认值继续，不停滞

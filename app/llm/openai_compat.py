@@ -8,7 +8,9 @@ from ..obs import log_event
 
 
 async def chat_stream(messages, model=None, cfg=None, tools=None):
-    """流式调 LLM，逐段 yield 文本（async 生成器）"""
+    """流式调 LLM,逐段 yield delta 对象(async 生成器)
+    tools: OpenAI function 定义列表,传给 API 让模型能发起 tool_calls
+    """
     cfg = cfg or load_models()
     conf = cfg.get_model(model)          # env 覆写 key 已在 get_model 里做
     client = AsyncOpenAI(
