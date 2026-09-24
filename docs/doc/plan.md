@@ -242,12 +242,13 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 | v2.2 | 澄清提问:ask_user 工具 + 协议 + prompt | 提问澄清可用(三态+超时) |
 | v2.3 | 多步串联联调 | 2.9 多步串联场景跑通（三场景需要 v3 工具,留到 v3.3） |
 | v2.4 | 收尾:SQLite 落库 recent_files + `/api/metrics` 聚合端点 | 重启后最近访问可查;/api/metrics 有数据 |
+| v2.5 | 检索(RAG):index_dir / search 两工具(sqlite-vec) | 对 docs 提问答得出且带引用 |
 
 ## 2.2 新增能力
 
 ### ReAct 主循环
 - `agent/runner.py` 改造:LLM 决策 → 调 tool → 观察结果 → 再决策 → 直到完成
-- 终止条件:LLM 不再返回 tool_calls(给最终回复)或达到 `MAX_STEPS`(硬上限,防死循环,默认 6)
+- 终止条件:LLM 不再返回 tool_calls(给最终回复)或达到 `MAX_STEPS`(硬上限,防死循环;可配置,默认 20,env `AGENT_MAX_STEPS`)
 - 中间步骤(tool_call)实时推前端,可见执行过程
 
 ### 文件工具
@@ -479,7 +480,7 @@ else:
 - [x] 1. 工具注册中心:统一 schema(name, description, parameters),转 OpenAI function 定义(`tools/registry.py`,`definitions` + `execute`)
 - [x] 2. read_file 一个工具够用(`tools/file.py`,自带 register)
 - [x] 3. LLM function calling 接入:流式处理 tool_calls(按 index 累积拼接 → json.loads)(`tools/calls.py`,buffer 只累积 / parse 流结束后解析,职责分离;openai_compat 加 `tools` 参数)
-- [x] 4. runner 改造 ReAct 循环:流式 + 多轮决策 + MAX_STEPS 终止 + tool_call 事件(`MAX_STEPS=6`;assistant(content+tool_calls) 与 role=tool 结果成对落历史;tool 执行异常喂回模型自纠)
+- [x] 4. runner 改造 ReAct 循环:流式 + 多轮决策 + MAX_STEPS 终止 + tool_call 事件(`MAX_STEPS` 可配置默认 20,env `AGENT_MAX_STEPS`;assistant(content+tool_calls) 与 role=tool 结果成对落历史;tool 执行异常喂回模型自纠)
 - [x] 5. 观测埋点:`app/obs.py`(log_event → logs/metrics.jsonl + 内存计数) + chat_stream 记 LLM 延迟/token(顺带修 tools 参数 / delta yield / usage 拿取残局,见 1.6) + 回合耗时埋点(usage 在末尾空 choices 的 chunk 上,需先接住再 continue)
 - [x] 6. ⭐ 验收闭环:对话"读一下 a.md" → 循环跑通(先证明循环没问题,再铺工具)(实测 metrics:steps=2 / tools=1 / tools_ok=1)
 
@@ -504,6 +505,13 @@ else:
 ### v2.4:收尾
 - [ ] 1. SQLite 初始化 + recent_files 落库(替换内存占位)
 - [ ] 2. `GET /api/metrics`:聚合内存计数(会话数、回合数、tool_call 数、错误数、LLM 累计 token、平均延迟) + jsonl 落地检查
+
+### v2.5:检索(RAG)
+- [ ] 1. `tools/rag/index.py`:`index_dir(path)` 分块 + embedding + 入库(sqlite-vec 扩展,复用 v2.4 的 SQLite,不新起服务)
+- [ ] 2. `tools/rag/search.py`:`search(query, top_k)` 召回,纯向量检索(第一版不上 rerank / 混合检索)
+- [ ] 3. registry 注册两行 + 验收:对着 `docs/` 提问,答得出且带引用来源
+
+> 注:MAX_STEPS=20 后,长任务 + 读大文件会推高上下文。token 预算 + 工具返回落盘只留摘要 + 分层压缩是已知待办(撞上前不展开设计,避免过度设计)
 
 > 顺序原则(自己的原则):先跑通核心循环(v2.0)再扩展工具(v2.1)——否则一堆工具写完才发现循环有问题,返工。SQLite 延后(v2.4)减少早期复杂度。
 
@@ -540,6 +548,7 @@ else:
 | v3.1 | 文件工具补充 + 规划能力:move_file / make_dir + plan prompt + plan 事件 | 整理文件夹可规划执行 |
 | v3.2 | 前端可视化:对话 UI + plan/tool_call 展示 + 确认弹窗 + 文件面板 | 前端跑通所有协议 |
 | v3.3 | 端到端验收:三场景串联 | 三场景端到端跑通 |
+| v3.4 | Eval:20~30 条任务 + 期望结果,跑出成功率/平均步数 | 有个数字能证明它变好了 |
 
 ## 3.2 新增能力
 
@@ -608,6 +617,9 @@ app/
 
 ### v3.3:端到端验收
 - [ ] 1. 验收场景串联:三场景端到端跑通
+
+### v3.4:Eval 评测
+- [ ] 1. `eval/` 独立脚本:20~30 条任务 + 期望结果,跑一遍输出成功率 + 平均步数(不进主流程)
 
 ## 3.6 验收
 

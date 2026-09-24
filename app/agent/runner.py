@@ -1,5 +1,6 @@
 from typing import AsyncIterator
 import json
+import os
 import time
 from ..llm.openai_compat import chat_stream
 from ..obs import log_event
@@ -7,15 +8,17 @@ from .events import ChunkEvent, DoneEvent, ErrorEvent,ToolCallEvent
 from .session import Session
 from ..tools.calls import buffer_tool_calls,parse_tool_calls
 from ..tools.file import register as register_file
+from ..tools.command import register as register_command
 from ..tools.registry import ToolRegistry
 
 _registry = ToolRegistry()
 register_file(_registry)  #模块级注册一次：tools=definitions随请求发出
+register_command(_registry)  # 命令工具:执行前由 runner 走 confirm 回调
 
-MAX_STEPS = 6 #ReAct 轮数上限，防模型连续调工具失控
+MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "20")) #ReAct 轮数上限，防模型连续调工具失控；放开给多步/长任务留空间
 
 async def run_turn(
-    session: Session, user_text: str, cfg=None
+    session: Session, user_text: str, cfg=None,confirm=None
 ) -> AsyncIterator[ChunkEvent | DoneEvent | ErrorEvent | ToolCallEvent]:
     """追加用户消息 → 流式调 LLM → yield 事件 → 完整回复落回 session
 
@@ -71,8 +74,29 @@ async def run_turn(
             for c in calls:
                 n_tools += 1
                 try:
-                    result = _registry.execute(c["name"], c["arguments"])
-                    n_tools_ok += 1
+                try:
+                    if c["name"] == "run_command":
+                        # 命令类工具必须过确认:无回调(WS 未接任务3)或用户拒绝 → 不执行
+                        approved = (
+                            await confirm(
+                                c["arguments"].get("cmd", ""),
+                                c["arguments"].get("cwd", "."),
+                            )
+                            if confirm
+                            else False
+                        )
+                        if not approved:
+                            result = (
+                                "用户拒绝执行该命令"
+                                if confirm
+                                else "未接入确认通道,命令没有执行"
+                            )
+                        else:
+                            result = _registry.execute(c["name"], c["arguments"])
+                            n_tools_ok += 1
+                    else:
+                        result = _registry.execute(c["name"], c["arguments"])
+                        n_tools_ok += 1
                 except Exception as e:
                      # 业务执行失败(文件不存在等)喂回给模型,让它自己改路径或向用户解释
                     result = f"工具执行失败: {e}"
