@@ -11,3 +11,5 @@ configs/models.yaml
 # IDE
 .idea/
 .vscode/
+# 指标日志
+logs/
