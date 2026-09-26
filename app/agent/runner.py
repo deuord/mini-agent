@@ -1,7 +1,7 @@
 from typing import AsyncIterator
 import json
-import os
 import time
+from ..config.loader import load_models
 from ..llm.openai_compat import chat_stream
 from ..obs import log_event
 from .events import ChunkEvent, DoneEvent, ErrorEvent,ToolCallEvent
@@ -14,8 +14,6 @@ from ..tools.registry import ToolRegistry
 _registry = ToolRegistry()
 register_file(_registry)  #模块级注册一次：tools=definitions随请求发出
 register_command(_registry)  # 命令工具:执行前由 runner 走 confirm 回调
-
-MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "20")) #ReAct 轮数上限，防模型连续调工具失控；放开给多步/长任务留空间
 
 async def run_turn(
     session: Session, user_text: str, cfg=None,confirm=None
@@ -32,9 +30,10 @@ async def run_turn(
     n_tools_ok = 0
     session.append("user", user_text)  # 1.用户消息写进历史
 
+    max_steps = load_models().agent_max_steps  # 从配置读,默认 6;v4.1 放开时只改 models.yaml,runner 不动
     full_reply = ""
     try:
-        for step in range(MAX_STEPS):
+        for step in range(max_steps):
             steps = step + 1
             full_reply = "" #每轮只累计本轮文本
             tool_calls_buf: dict[int, dict[str, str]] = {} #每轮清空工具调用缓存
@@ -109,7 +108,7 @@ async def run_turn(
 
         #for走完还没return = MAX_STEPS轮都在调工具
         err = "max_steps"
-        yield ErrorEvent(message=f"执行步数超限：连续{MAX_STEPS}轮都在调工具")
+        yield ErrorEvent(message=f"执行步数超限：连续{max_steps}轮都在调工具")
     except Exception as e:
         del session.messages[start_len:] #删掉本轮全部消息（包含 user 消息和 tool 消息）
         full_reply = "" # 防止 finally 把本轮残留文本错写到上一轮
