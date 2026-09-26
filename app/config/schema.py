@@ -13,7 +13,7 @@ class ModelConfig(BaseModel):
 class Setting(BaseModel):
   default:str
   models: list[ModelConfig] = Field(min_length=1)
-  agent_max_steps: int = 6  # ReAct 轮数上限,v4.1 上下文工程完成后放开(改 models.yaml)
+  agent_max_steps: int = 6  # ReAct 轮数上限,v4.1 上下文工程完成后放开(改这里默认值,或 models.yaml 加 agent 段由 loader 读入)
   
 
   def get_model(self,name:str|None=None)->ModelConfig:

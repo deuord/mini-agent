@@ -284,7 +284,7 @@ CLI renderer 直接打印;WS renderer 包上 `session_id` 发 JSON。
 ### 流式取消（stop）
 - 用户中途点"停止":中断当前 LLM 流,终止 ReAct 循环,返回已生成内容
 - **传输无关**:runner 暴露 `cancel()` 句柄(asyncio 取消当前 chat 流);CLI 用 Ctrl+C 触发,WS 用 `{"type":"stop"}` 消息
-- 落地:runner 能力在 v2 就位,前端"停止"按钮放 v3.2,协议消息放 v2.5
+- 落地:runner `cancel()` 能力在 v2.4 就位(见 v2.4 任务4),前端"停止"按钮 + WS `stop` 消息放 v3.2
 
 ## 2.3 目录新增
 
@@ -628,6 +628,7 @@ app/
 - [ ] 4. "我的文件"面板:列出最近访问文件,点击在线查看/编辑
 - [ ] 5. write/edit diff 预览(7.1 决策的兜底,v2 不加确认靠它)
 - [ ] 6. 模型选择器 UI:切换后更新 session.model(与 Cursor/Trae 一致)
+- [ ] 7. 流式取消:前端"停止"按钮 + WS 发 {"type":"stop"} 触发 runner cancel
 
 ### v3.3:端到端验收
 - [ ] 1. 验收场景串联:三场景端到端跑通
@@ -650,7 +651,7 @@ app/
 
 | 切片 | 内容 | 验收 |
 |---|---|---|
-| v4.0 | Eval 基线:任务集 + 指标(成功率/步数/耗时/token) + 非交互模式(temperature=0) | 跑任务集出指标,能定位退步 |
+| v4.0 | Eval 基线:任务集 + 指标(成功率/步数/耗时/token) + 非交互模式(temperature=0) | 跑任务集出指标,能定位退步(前置:v3.0 JSON mode) |
 | v4.1 | 上下文工程:工具返回裁剪 → token 预算 → 循环检测 → 分层压缩 → 放开 max_steps | 长任务不爆上下文、不死循环 |
 | v4.2 | RAG 检索:切块 + embedding + 向量存储(sqlite-vec) + 混合检索 + rerank | 知识库问答跑通,检索精度可量化 |
 | v4.3 | 并发工具调用(可裁剪) | 互不依赖的工具并行执行 |
@@ -662,6 +663,7 @@ app/
 - 任务集:`evals/tasks.jsonl`,每条含输入、可判定的期望结果、超时
 - 指标:成功率、平均步数、平均耗时、token 消耗,按任务分类统计
 - 非交互模式:temperature=0、confirm/ask_user 自动默认(超时即默认),保证可复现
+- **前置依赖**:v3.0 的 JSON mode(结构化输出)已完成;任务集的"可判定期望结果"用结构化输出比对判定,不用字符串匹配(输出格式一波动就误判)
 - 输出:`evals/results.jsonl` + 汇总表;改 prompt/工具后跑一遍看有没有退步
 
 ### 上下文工程(v4.1,顺序不能乱)
@@ -669,13 +671,13 @@ app/
 - ② token 预算:每步算累计 token,逼近上限先精简再喂
 - ③ 循环检测:连续重复调用同一工具 → 提示换策略 / 中止
 - ④ 分层压缩:上下文超预算时,对早期历史做摘要压缩,近期保留原文
-- ⑤ 放开 max_steps:以上就位后,把 `agent_max_steps` 从 6 放开(只改 models.yaml,runner 不动)
+- ⑤ 放开 max_steps:以上就位后,把 `agent_max_steps` 从 6 放开(改 `app/config/schema.py` 的 `Setting.agent_max_steps` 默认值,或 `models.yaml` 新增 agent 段由 loader 读入;runner 不动)
 
 ### RAG(检索增强,v4.2)
 - 文档入库:切块(chunk)→ embedding → 存向量库
 - 检索:query 向量化 → 相似度检索 top-k → 拼进 prompt
 - **向量存储**:`sqlite-vec`(SQLite 向量扩展)——直接定生产级方案,与 recent_files 的 SQLite 单文件架构一致,零服务、零运维、clone 即用;不做 numpy/FAISS 起步再换的演进
-- **embedding provider**:DeepSeek 无 embeddings 端点,需另接一个 provider(如硅基流动 / 智谱 / BAAI bge 等),在 models.yaml 加 embedding 配置
+- **embedding provider**:DeepSeek 无 embeddings 端点,需另接 provider。默认方案:本地 BGE 模型(如 bge-small-zh,免 key、离线可用,符合桌面单机定位);备选:硅基流动 / 智谱云端 embedding(在 models.yaml 加 embedding 配置)
 - **混合检索**:BM25(基于 SQLite FTS5 全文索引)+ 向量相似度加权融合(`score = α·bm25 + (1-α)·vec`),兼顾关键词精确命中与语义召回
 - **rerank**:召回候选用重排模型(如 BGE-reranker)或 LLM 打分重排,取 top-k 拼 prompt,提升检索精度
 
@@ -686,6 +688,7 @@ app/
 ### 长期记忆(v4.4)
 - 用户偏好 / 历史决策(如"以后输出都用中文""命令默认确认")向量化存 sqlite-vec,跨 session 持久
 - 新对话开始时检索相关记忆拼进 system prompt,实现跨 session 的个性化;带时间衰减,越旧权重越低
+- 说明:这是 mini-agent 项目自身的记忆模块,与宿主 Agent 的记忆无关
 
 ### LLM 语义缓存(v4.4)
 - 相似 query 命中缓存:新 query 做 embedding,与历史 query 相似度 > 阈值(如 0.95)直接返回缓存结果
@@ -719,7 +722,7 @@ app/
 - [ ] 2. token 预算:每步累计 token,逼近上限先精简
 - [ ] 3. 循环检测:重复调用同工具 → 提示换策略/中止
 - [ ] 4. 分层压缩:早期历史摘要压缩,近期保留原文
-- [ ] 5. 放开 max_steps:`agent_max_steps` 从 6 放开(改 models.yaml)
+- [ ] 5. 放开 max_steps:`agent_max_steps` 从 6 放开(改 schema.py 的 Setting 默认值,或 models.yaml 加 agent 段)
 
 ### v4.2:RAG 检索
 - [ ] 1. 文档切块 + embedding(另接 provider,DeepSeek 无 embeddings)
@@ -803,8 +806,8 @@ desktop/                   # Tauri 项目(壳 + 打包配置)
 | 项 | 标准 | 落地切片 |
 |---|---|---|
 | 测试 | pytest:单测(runner 循环 / registry / 工具 / config)+ 集成测试(端到端一个回合) | 每版验收前补对应测试 |
-| 代码质量 | ruff(lint+format)+ mypy + pre-commit | v1 收尾接上,全程跑 |
-| CI/CD | GitHub Actions:push / PR 跑 ruff + mypy + pytest | v1 收尾 |
+| 代码质量 | ruff(lint+format)+ mypy + pre-commit | 立即补(v2 收尾前接上),全程跑 |
+| CI/CD | GitHub Actions:push / PR 跑 ruff + mypy + pytest | 立即补(v2 收尾前接上) |
 | 文档 | README(亮点+架构图+benchmark+demo GIF)/ LICENSE(MIT)/ CONTRIBUTING / CHANGELOG / ARCHITECTURE / ADR | LICENSE+README 在 v1,其余随版本补 |
 | 安全 | 命令危险检测 + 路径逃逸防护 + prompt 注入防护 | v2.1 起,持续迭代 |
 | 开箱即用 | models.example.yaml + .env.example + 三步快速开始 | v1 |
