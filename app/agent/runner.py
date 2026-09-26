@@ -72,8 +72,7 @@ async def run_turn(
                 ],
             })
             for c in calls:
-                n_tools += 1
-                try:
+                n_tools += 1    
                 try:
                     if c["name"] == "run_command":
                         # 命令类工具必须过确认:无回调(WS 未接任务3)或用户拒绝 → 不执行
