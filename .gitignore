@@ -16,3 +16,6 @@ logs/
 
 # macOS 系统垃圾文件
 .DS_Store
+
+# 联调/判据临时文件
+test_*.md

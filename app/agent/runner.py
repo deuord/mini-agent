@@ -30,7 +30,7 @@ async def run_turn(
     n_tools_ok = 0
     session.append("user", user_text)  # 1.用户消息写进历史
 
-    max_steps = load_models().agent_max_steps  # 从配置读,默认 6;v4.1 放开时只改 models.yaml,runner 不动
+    max_steps = load_models().agent_max_steps  # 从配置读,默认 6;v4.1 放开时改这里默认值,或 models.yaml 加 agent 段
     full_reply = ""
     try:
         for step in range(max_steps):
@@ -38,8 +38,7 @@ async def run_turn(
             full_reply = "" #每轮只累计本轮文本
             tool_calls_buf: dict[int, dict[str, str]] = {} #每轮清空工具调用缓存
 
-            
-        # 2.用整个 session 历史调 LLM（记忆）,tools随请求发出
+            # 2.用整个 session 历史调 LLM（记忆）,tools随请求发出
             async for delta in chat_stream(session.messages, cfg=cfg,tools=_registry.definitions):
                 if delta.content: # 正文文字,逐段送给界面显示
                     full_reply += delta.content
@@ -71,7 +70,7 @@ async def run_turn(
                 ],
             })
             for c in calls:
-                n_tools += 1    
+                n_tools += 1
                 try:
                     if c["name"] == "run_command":
                         # 命令类工具必须过确认:无回调(WS 未接任务3)或用户拒绝 → 不执行
@@ -96,7 +95,7 @@ async def run_turn(
                         result = _registry.execute(c["name"], c["arguments"])
                         n_tools_ok += 1
                 except Exception as e:
-                     # 业务执行失败(文件不存在等)喂回给模型,让它自己改路径或向用户解释
+                # 业务执行失败(文件不存在等)喂回给模型,让它自己改路径或向用户解释
                     result = f"工具执行失败: {e}"
                 # tool 消息必须带 tool_call_id,漏了直接 API 400(plan 第二坑)
                 session.messages.append({
@@ -129,6 +128,3 @@ async def run_turn(
         # 4b.消费者中途退出(WS 断开等)时,把已流出的文本补写回历史,不丢半截回复
         if full_reply and session.messages and session.messages[-1]["role"] == "user":
             session.append("assistant", full_reply)
-
-
-   
