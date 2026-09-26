@@ -35,15 +35,17 @@ async def repl():
 
 
 
-    def main():
-        async def _confirm(cmd: str, cwd: str) -> bool:
-        # v2.1 过渡版:直接 input。v2.2 任务3 建统一输入通道后,把这里换成 wait_line,别的不动
-                while True:
-                    line = input(f"执行命令? {cmd} (cwd={cwd}) [y/n]: ").strip().lower()
-                    if line in ("y", "n"):  # 只认 y/n 忽略大小写,其他输入重问(plan 解析规则)
-                        return line == "y"
-                    print("(只认 y/n,重新输入)", flush=True)
-                asyncio.run(repl())
+async def _confirm(cmd: str, cwd: str) -> bool:
+    # v2.1 过渡版:直接 input。v2.2 任务3 建统一输入通道后,把这里换成 wait_line,别的不动
+    while True:
+        line = input(f"执行命令? {cmd} (cwd={cwd}) [y/n]: ").strip().lower()
+        if line in ("y", "n"):  # 只认 y/n 忽略大小写,其他输入重问(plan 解析规则)
+            return line == "y"
+        print("(只认 y/n,重新输入)", flush=True)
+
+
+def main():
+    asyncio.run(repl())
 
 
 if __name__ == "__main__":
