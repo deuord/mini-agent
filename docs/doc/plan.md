@@ -339,9 +339,9 @@ class AskUserEvent(BaseModel):
 - 后端透传放 v2.4,前端选择器放 v3.2
 
 ### 流式取消（stop）
-- 用户中途点"停止":中断当前 LLM 流,终止 ReAct 循环,返回已生成内容
-- **传输无关**:runner 暴露 `cancel()` 句柄(asyncio 取消当前 chat 流);CLI 用 Ctrl+C 触发,SSE 侧由前端 abort fetch(断流)触发
-- 落地:runner `cancel()` 能力在 v2.4 就位(见 v2.4 任务4),前端"停止"按钮放 v3.2
+- 用户中途点"停止":中断当前 LLM 流,终止 ReAct 循环;已生成内容照常落历史（persist partial,见 2.5 / ADR-0003）
+- **不需要 runner 暴露 `cancel()` API(v2.1 修正)**:取消就是客户端把请求断掉——CLI 是 Ctrl+C、SSE 前端是 abort fetch。`CancelledError` 直接打进正在跑的那段生成器,由 `_react` 的 `finally` 保半截正文 + 补 tool 占位(见 2.7)。原来那套"runner 握一个取消句柄"是 WebSocket 时代的残留:WS 要服务器握着连接去取消后台 run,SSE 里请求本身就是那个 run
+- 落地:v2.4 只做两条取消路径(CLI Ctrl+C / SSE abort)的端到端验证(见 v2.4 任务4),能力已随 SSE 天然具备;前端"停止"按钮放 v3.2
 
 ## 2.3 目录新增
 
@@ -353,7 +353,7 @@ app/
 │   ├── __init__.py
 │   ├── registry.py            # 工具注册中心(v3 文档工具也用这个)
 │   ├── file.py                # read/write/edit/list_recent
-│   ├── shell.py               # run_command(带确认流)
+│   ├── command.py             # run_command(带确认流)
 │   └── ask_user.py            # 澄清提问工具(runner 层拦截，不直接执行)
 ├── store/
 │   └── db.py                  # SQLite 连接 + 表初始化
@@ -520,68 +520,94 @@ ask_user：  LLM 调 tool → runner 检测到 ask_user → 存断点 + yield As
 ```python
 async def run_turn(session, user_text, cfg=None):
     """第一段:追加用户消息后起跑"""
-    if session.pending:                      # 上个断点没答完,不许插新消息
-        yield ErrorEvent(message="还有待处理的确认/提问,请先回答")
-        return
-    session.append("user", user_text)
-    async for ev in _react(session, cfg, step_start=1):
-        yield ev
+    async with session.lock:                 # 同一会话串行:并发的第二个请求在锁上排队,锁持到本段流结束(见 2.5)
+        if session.pending:                  # 上个断点没答完,不许插新消息
+            yield ErrorEvent(message="还有待处理的确认/提问,请先回答")
+            return
+        session.append("user", user_text)
+        # aclosing 必须显式关:async for 在 break / 异常 / 外部取消时都不会自动关子生成器,
+        # 那样 _react 的 finally(保半截正文 + 补 tool 占位)压根不会执行,只剩 GC 兜底=不确定
+        async with aclosing(_react(session, cfg, step_start=1)) as gen:
+            async for ev in gen:
+                yield ev
 
 async def resume_turn(session, answer, cfg=None):
     """后续段:从 session.pending 续跑"""
-    p = session.pending
-    if not p:
-        yield ErrorEvent(message="没有待回答的断点")
-        return
-    session.pending = None
-    # 先补上断点那个 call 的结果(结果可能是"命令输出"/"用户拒绝"/"timeout")
-    result = _resolve_answer(p, answer)      # 惰性超时也在这里判:now > expires_at → timeout
-    session.messages.append(tool_msg(p["tool_call_id"], result))
-    yield ToolCallEvent(step=p["step"], name=p["name"], args=p["args"], result=str(result))
-    if _is_cancelled(p, answer):             # 用户取消整个任务
-        yield DoneEvent(); return            # tool 结果已补,历史合法,直接收尾
-    async for ev in _react(session, cfg, step_start=p["step"],
-                           calls=p["calls"], call_start=p["call_index"] + 1):
-        yield ev
+    async with session.lock:                 # 与 run_turn 同一把锁:续跑期间不许别的请求插队(见 2.5)
+        p = session.pending
+        if not p:
+            yield ErrorEvent(message="没有待回答的断点")
+            return
+        if answer["tool_call_id"] != p["tool_call_id"] or answer["kind"] != p["kind"]:
+            yield ErrorEvent(message="断点不匹配（可能已回答或已过期）")  # 迟到/重发/串题都在这挡住
+            return
+        session.pending = None
+        # 先补上断点那个 call 的结果(结果可能是"命令输出"/"用户拒绝"/"timeout")
+        result = await _resolve_answer(p, answer)  # 惰性超时也在这里判:now > expires_at → timeout
+        session.messages.append(tool_msg(p["tool_call_id"], result))
+        yield ToolCallEvent(step=p["step"], name=p["name"], args=p["args"], result=str(result))
+        if _is_cancelled(p, answer):             # 用户取消整个任务
+            yield DoneEvent(); return            # tool 结果已补,历史合法,直接收尾
+        async with aclosing(_react(session, cfg, step_start=p["step"],
+                                   calls=p["calls"], call_start=p["call_index"] + 1)) as gen:
+            async for ev in gen:
+                yield ev
 
 async def _react(session, cfg, step_start, calls=None, call_start=0):
-    max_steps = load_models().agent_max_steps              # 默认 6
-    for step in range(step_start, max_steps + 1):
-        if calls is None:                                  # 正常轮:先让 LLM 决策
-            content, buf = "", {}
-            async for delta in chat_stream(session.messages, cfg=cfg,
-                                           tools=registry.definitions):
-                if delta.content:
-                    content += delta.content
-                    yield ChunkEvent(content=delta.content)   # 有文本 → 逐字推给用户
-                if delta.tool_calls:
-                    buffer(buf, delta.tool_calls)              # 按 index 累积,不给用户看
-            if not buf:                                    # 无 tool_calls → 本段结束
-                session.append("assistant", content)
-                yield DoneEvent(); return
-            calls = parse(buf)                             # 分片拼完整后才 json.loads
-            session.messages.append(assistant_msg(content, calls))  # content+tool_calls 同条消息
-            call_start = 0                                 # 新的一步,从第 0 个 call 开始
-        for i in range(call_start, len(calls)):            # 执行本步的 tool_calls
-            c = calls[i]
-            if c["name"] == "ask_user":
-                session.pending = {"kind": "ask_user", "step": step, "call_index": i,
-                                   "calls": calls, "tool_call_id": c["id"],
-                                   "name": c["name"], "args": c["arguments"],
-                                   "created_at": now(), "expires_at": now() + timeout}
-                yield AskUserEvent(...); return             # 结束本段,等回答
-            if c["name"] == "run_command":
-                session.pending = {"kind": "confirm", "step": step, "call_index": i,
-                                   "calls": calls, "tool_call_id": c["id"],
-                                   "name": c["name"], "args": c["arguments"],
-                                   "created_at": now(), "expires_at": None}
-                yield ConfirmRequestEvent(...); return       # 结束本段,等确认
-            result = registry.execute(c)                    # 普通工具直接执行
-            session.messages.append(tool_msg(c["id"], result))
-            yield ToolCallEvent(...)
-        calls = None                                       # 本步跑完 → 下一轮重新决策
-    else:
-        yield ErrorEvent(message="执行步数超限")
+    max_steps = load_models().agent_max_steps    # 默认 6
+    unpaired = [c["id"] for c in calls[call_start:]] if calls else []  # 本步还没落结果的 call
+    half = ""                                    # 本轮已生成、还没进历史的正文
+    try:
+        for step in range(step_start, max_steps + 1):
+            if calls is None:                    # 正常轮:先让 LLM 决策
+                content, buf = "", {}
+                async for delta in chat_stream(session.messages, cfg=cfg,
+                                               tools=registry.definitions):
+                    if delta.content:
+                        content += delta.content
+                        half = content             # 边生成边记:这会儿被掐断,已显示出去的字不能丢
+                        yield ChunkEvent(content=delta.content)  # 有文本 → 逐字推给用户
+                    if delta.tool_calls:
+                        buffer(buf, delta.tool_calls)            # 按 index 累积,不给用户看
+                half = ""                      # 流式阶段收尾:下面要么落成 assistant 文本、要么随 tool_calls 一起落盘
+                if not buf:                    # 无 tool_calls → 本段结束
+                    session.append("assistant", content)
+                    yield DoneEvent(); return
+                calls = parse(buf)             # 分片拼完整后才 json.loads
+                session.messages.append(assistant_msg(content, calls))  # content+tool_calls 同条消息
+                unpaired = [c["id"] for c in calls]
+                call_start = 0                 # 新的一步,从第 0 个 call 开始
+            for i in range(call_start, len(calls)):  # 执行本步的 tool_calls
+                c = calls[i]
+                if c["name"] == "ask_user":
+                    session.pending = {"kind": "ask_user", "step": step, "call_index": i,
+                                       "calls": calls, "tool_call_id": c["id"],
+                                       "name": c["name"], "args": c["arguments"],
+                                       "created_at": now(), "expires_at": now() + timeout}
+                    unpaired = []              # 断点接管了,不当成"中断丢结果"补占位
+                    yield AskUserEvent(...); return       # 结束本段,等回答
+                if c["name"] == "run_command":
+                    session.pending = {"kind": "confirm", "step": step, "call_index": i,
+                                       "calls": calls, "tool_call_id": c["id"],
+                                       "name": c["name"], "args": c["arguments"],
+                                       "created_at": now(), "expires_at": None}
+                    unpaired = []
+                    yield ConfirmRequestEvent(...); return  # 结束本段,等确认
+                # 普通工具直接执行;必须丢线程池——工具都是同步阻塞的(run_command 能跑几十秒),
+                # 直接在协程里调会把事件循环卡住,期间所有请求(含 /api/health)全部停摆
+                result = await to_thread(registry.execute, c)
+                session.messages.append(tool_msg(c["id"], result))
+                unpaired.remove(c["id"])
+                yield ToolCallEvent(...)
+            calls = None; call_start = 0; unpaired = []  # 本步跑完 → 下一轮重新决策
+        else:
+            yield ErrorEvent(message="执行步数超限")
+    finally:
+        # 本段被中途掐断(断流/取消)时的两条兜底,少了任一条,下一次请求都会出问题
+        if half:                               # ① 保住已生成的正文:用户屏幕上看到的内容必须和历史一致(ADR-0003)
+            session.append("assistant", half + "\n\n（回复已中断）")
+        for cid in unpaired:                   # ② 给没配对的 call 补占位结果,否则下次请求直接 400
+            session.messages.append(tool_msg(cid, "（中断，未执行）"))
 ```
 
 **为什么断点里要存 `calls` 而不是"从历史反解析"**：历史里确实有 `assistant(带 tool_calls)`，但反解析要依赖"最后一条 assistant 消息就是当前这条"这种隐式约定，多个 tool_calls 时定位还容易错。存下来更直白、更不容易出错，代价只有几十字节。
@@ -627,7 +653,7 @@ async def _react(session, cfg, step_start, calls=None, call_start=0):
 - [ ] 1. SQLite 初始化 + recent_files 落库(替换内存占位) + Session 历史与**断点**落库(重启不丢,断点可续)
 - [ ] 2. `GET /api/metrics`:聚合内存计数(会话数、回合数、tool_call 数、错误数、LLM 累计 token、平均延迟) + jsonl 落地检查
 - [ ] 3. 模型切换后端透传:Session 加 model 字段 + run_turn 透传 model 给 chat_stream(与 Cursor/Trae 一致,方案见 2.2)
-- [ ] 4. 流式取消:runner `cancel()` 句柄 + SSE 断流(前端 abort fetch) + CLI Ctrl+C(前端按钮放 v3.2)
+- [ ] 4. 流式取消端到端验证:CLI Ctrl+C + SSE abort fetch 两条路径跑通(保半截正文、补 tool 占位都生效,见 2.2 / 2.7);能力已随 SSE 天然具备,不额外加 API
 - [ ] 5. 会话清理:`DELETE /api/sessions/{id}`(SessionStore 补 `delete()`);前端删除入口放 v3
 
 > 顺序原则(自己的原则):先跑通核心循环(v2.0)再扩展工具(v2.1)——否则一堆工具写完才发现循环有问题,返工。SQLite 延后(v2.4)减少早期复杂度。
@@ -740,7 +766,7 @@ app/
 - [ ] 4. "我的文件"面板:列出最近访问文件,点击在线查看/编辑
 - [ ] 5. write/edit diff 预览(7.1 决策的兜底,v2 不加确认靠它)
 - [ ] 6. 模型选择器 UI:切换后更新 session.model(与 Cursor/Trae 一致)
-- [ ] 7. 流式取消:前端"停止"按钮 + abort fetch（断流）触发 runner cancel
+- [ ] 7. 流式取消:前端"停止"按钮 → abort fetch(断流),无需调后端接口(见 2.2)
 
 ### v3.3:端到端验收
 - [ ] 1. 验收场景串联:三场景端到端跑通
