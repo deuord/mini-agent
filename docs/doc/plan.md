@@ -800,7 +800,9 @@ app/
 ### Eval(效果评估,先做)
 - 任务集:`evals/tasks.jsonl`,每条含输入、可判定的期望结果、超时
 - 指标:成功率、平均步数、平均耗时、token 消耗,按任务分类统计
-- 非交互模式:temperature=0、confirm/ask_user 自动默认(超时即默认),保证可复现
+- 非交互模式:temperature=0、**confirm auto-approve + ask_user 预置回答**,保证可复现
+  - confirm 永不超时(§2.5),等超时等于挂死;Eval 模式直接 auto-approve(等价业界 `--autonomy` / `--dangerously-skip-permissions`),安全靠隔离环境不靠确认门
+  - ask_user 不等超时,用例里预置回答(`tasks.jsonl` 每条带 `"answers"`,runner 检测到 ask_user 时从预置表取,不问真人;与 Magentic-UI 的 Simulated User 同思路)
 - **前置依赖**:v3.0 的 JSON mode(结构化输出)已完成;任务集的"可判定期望结果"用结构化输出比对判定,不用字符串匹配(输出格式一波动就误判)
 - 输出:`evals/results.jsonl` + 汇总表;改 prompt/工具后跑一遍看有没有退步
 
@@ -851,7 +853,7 @@ app/
 
 ### v4.0:Eval 基线
 - [ ] 1. 任务集:`evals/tasks.jsonl`(输入 + 可判定期望结果 + 超时)
-- [ ] 2. 非交互模式:temperature=0、confirm/ask_user 自动默认(超时即默认)
+- [ ] 2. 非交互模式:temperature=0、confirm auto-approve + ask_user 预置回答(见 §4.2 调研结论,不等超时)
 - [ ] 3. 指标统计:成功率 / 平均步数 / 耗时 / token,按分类汇总
 - [ ] 4. 输出 results.jsonl + 汇总表,改 prompt 后能跑回归
 
