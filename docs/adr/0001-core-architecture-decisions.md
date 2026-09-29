@@ -1,11 +1,13 @@
 # ADR-0001 核心架构决策
 
 日期：2026-09-26
-状态：已接受
+状态：已接受（决策 1 已于 2026-09-29 被 [ADR-0002](./0002-http-sse-over-websocket.md) 废止）
 
 本文记录 mini-agent 的三个核心架构决策及理由。
 
 ## 决策 1：Web 端用 WebSocket 而非 SSE
+
+> **已废止（2026-09-29）**：本决策被 [ADR-0002](./0002-http-sse-over-websocket.md) 取代。其理由建立在「确认 / 提问需要双向长连接」这一错误前提上，v2.1 已改为 HTTP + SSE + 回合断点，WebSocket 端点删除。以下保留原始记录，不复改。
 
 **背景**：agent 的对话是双向的，不仅后端要流式推 token 给前端，前端还要回传用户输入（对话消息、命令确认、ask_user 回答、停止信号）。
 
@@ -37,7 +39,7 @@
 
 **背景**：项目要支持 CLI / Web / 桌面三端。
 
-**决策**：agent 核心（runner）只产出事件流，不 print、不碰 WebSocket；三端各自实现 renderer 消费事件流，需要回传时注入回调（confirm / ask_user / cancel）。
+**决策**：agent 核心（runner）只产出事件流，不 print、不碰任何传输层；三端各自实现 renderer 消费事件流。遇「需要用户输入」时，runner 把断点写进 `session.pending` 并结束本段，由调用方发起新请求续跑（`resume_turn`）——见 [ADR-0002](./0002-http-sse-over-websocket.md)；**原描述的「注入 confirm / ask_user 回调」已于 v2.1 废弃**（回调会让 runner 挂起等回答，与上面这条冲突）。
 
 **理由**：
 

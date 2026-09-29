@@ -1,4 +1,4 @@
-# app/tools/command.py — 命令执行工具:只管执行,执行前的确认在 runner 层走 confirm 回调
+# app/tools/command.py — 命令执行工具:只管执行,执行前的确认在 runner 层存断点等用户回答(见 plan 2.5)
 import subprocess
 from app.tools.registry import ToolRegistry
 
@@ -12,10 +12,10 @@ def run_command(cmd:str,cwd:str = ".")->str:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=90,  #执行超过90秒、超时直接终止
+            timeout=30,  #执行超过30秒、超时直接终止(确认等待永不超时,与这个无关,见 plan 2.5)
         )
     except subprocess.TimeoutExpired:
-        return f"命令超过90s被终止:{cmd}"
+        return f"命令超过30s被终止:{cmd}"
     except (FileNotFoundError,NotADirectoryError):
         return f"文件或目录不存在:{cwd}"
     out = (r.stdout or "").strip() + (r.stderr or "")
@@ -27,7 +27,7 @@ def run_command(cmd:str,cwd:str = ".")->str:
 def register(registry:ToolRegistry)->None:
     registry.register(
         name = "run_command",
-        description = "在本机 shell 执行一条命令,返回退出码和输出。执行前会先向用户请求确认,用户可能拒绝;命令最长运行 90 秒",
+        description = "在本机 shell 执行一条命令,返回退出码和输出。执行前会先向用户请求确认,用户可能拒绝;命令最长运行 30 秒",
         parameters={
             "type":"object",
             "properties":{

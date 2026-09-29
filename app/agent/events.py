@@ -22,3 +22,12 @@ class ToolCallEvent:
     name:str = ""
     args:dict = field(default_factory=dict)
     result:str = ""
+
+@dataclass
+class ConfirmRequestEvent:
+    # 命令确认请求:yield 出这个事件后本段立即结束,等调用方发 resume(见 plan 2.5)
+    type:str = "confirm_request"
+    step:int = 0
+    tool_call_id:str = ""    # 关联键就是它,不再另造 confirm_id
+    cmd:str = ""
+    cwd:str = ""

@@ -6,6 +6,8 @@ class Session:
     def __init__(self,session_id:str|None=None):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.messages:list[dict] = []
+        # 回合断点:等确认/等回答时非空(见 plan 2.5);一个会话同时只有一个活跃回合,所以挂会话上就够
+        self.pending:dict|None = None
         self.create_time = time.time()
         self.update_time = time.time()
 

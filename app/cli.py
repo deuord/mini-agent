@@ -1,8 +1,8 @@
 # app/cli.py — v1.0 入口(先跑通启动)
 import asyncio
-from app.agent.runner import run_turn
-from app.store.session_store import SessionStore
 import json
+from app.agent.runner import run_turn, resume_turn
+from app.store.session_store import SessionStore
 
 
 async def repl():
@@ -22,23 +22,37 @@ async def repl():
         if not user_input:
             continue
 
-        print("助手：", end="", flush=True)
-        async for ev in run_turn(session, user_input, confirm=_confirm):
-            if ev.type == "chunk":
-                print(ev.content, end="", flush=True)
-            elif ev.type == "tool_call":
-                print(f"\n[调用工具 #{ev.step}] {ev.name} 参数={json.dumps(ev.args, ensure_ascii=False)}")
-            elif ev.type == "done":
-                print("\n")
-            elif ev.type == "error":
-                print(f"错误：{ev.message}\n")
+        await _render(session, run_turn(session, user_input))
 
 
+async def _render(session, events):
+    """消费一段事件流;遇确认请求就问一句、再起一段续跑(一问一答,不挂起连接)"""
+    async for ev in events:
+        if ev.type == "chunk":
+            print(ev.content, end="", flush=True)
+        elif ev.type == "tool_call":
+            print(f"\n[调用工具 #{ev.step}] {ev.name} 参数={json.dumps(ev.args, ensure_ascii=False)}")
+        elif ev.type == "confirm_request":
+            print(f"\n执行命令? {ev.cmd} (cwd={ev.cwd})")
+            answer = {
+                "tool_call_id": ev.tool_call_id,
+                "kind": "confirm",
+                "approve": _ask_yn(),
+            }
+            await _render(session, resume_turn(session, answer))
+        elif ev.type == "done":
+            print("\n")
+        elif ev.type == "error":
+            print(f"错误：{ev.message}\n")
 
-async def _confirm(cmd: str, cwd: str) -> bool:
-    # v2.1 过渡版:直接 input。v2.2 任务3 建统一输入通道后,把这里换成 wait_line,别的不动
+
+def _ask_yn() -> bool:
     while True:
-        line = input(f"执行命令? {cmd} (cwd={cwd}) [y/n]: ").strip().lower()
+        try:
+            line = input("y/n: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return False
         if line in ("y", "n"):  # 只认 y/n 忽略大小写,其他输入重问(plan 解析规则)
             return line == "y"
         print("(只认 y/n,重新输入)", flush=True)
