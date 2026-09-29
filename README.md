@@ -6,13 +6,13 @@ A lightweight desktop task agent that understands natural-language instructions 
 
 ## 技术亮点
 
-- **传输无关的 Runner 内核**：agent 核心只产出事件流（`chunk` / `tool_call` / `plan` / `done` / `error`），不 print、不碰 WebSocket。CLI、Web、桌面（Tauri）都只是 renderer，同一套 ReAct 循环三端复用。
+- **传输无关的 Runner 内核**：agent 核心只产出事件流（`chunk` / `tool_call` / `confirm_request` / `plan` / `done` / `error`），不 print、不碰任何传输层。CLI、Web（HTTP + SSE）、桌面（Tauri）都只是 renderer，同一套 ReAct 循环三端复用。
 - **ReAct 循环 + 流式 Function Calling**：流式 `tool_calls` 按 `index` 累积拼接再 `json.loads`；assistant(content+tool_calls) 与 role=tool 结果成对落历史，防止上下文丢失。
 - **工具注册中心**：统一 schema 转 OpenAI function 定义，新增工具只需 `register(name, description, parameters, handler)`。
-- **命令安全执行**：`run_command` 执行前走确认回调（永不超时），配危险命令黑名单、路径逃逸防护、prompt 注入防护。
+- **命令安全执行**：`run_command` 执行前先向用户要确认（**回合断点模型**——断点落 `session.pending`、不挂起连接，用户可拒绝，等待永不超时）；危险命令黑名单 / 路径逃逸防护 / prompt 注入防护按 plan 安全章节推进。
 - **澄清提问（ask_user）**：Agent 遇歧义主动提问，三态 + 超时（answered / declined / cancelled / timeout）。
-- **可观测性**：每轮 LLM 延迟 / token / 步数埋点至 `logs/metrics.jsonl`，`/api/metrics` 聚合查询。
-- **单文件存储**：SQLite（最近访问 + Session 历史）+ sqlite-vec（向量检索），零服务、clone 即用。
+- **可观测性**：每轮 LLM 延迟 / token / 步数埋点至 `logs/metrics.jsonl`（`/api/metrics` 聚合查询规划在 v2.4）。
+- **单文件存储**：SQLite（最近访问 + Session 历史）+ sqlite-vec（向量检索），零服务、clone 即用（当前为内存占位，v2.4 落库）。
 
 ## 架构
 
@@ -84,18 +84,23 @@ uv run python -m app.main
 用户：跑一下 ls ~/Documents
 ```
 
-Web 端通过 WebSocket 对话，端点 `/api/chat/stream`；会话查询 `/api/sessions`。
+Web 端走 **HTTP + SSE**：`POST /api/chat` 发消息、`POST /api/chat/resume` 提交命令确认，两个端点都返回 `text/event-stream`；会话查询 `GET /api/sessions`、`GET /api/sessions/{id}`。
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/api/chat \
+  -H 'Content-Type: application/json' -d '{"content":"你好"}'
+```
 
 ## 功能状态
 
 | 能力 | 状态 |
 |---|---|
 | ReAct 循环 + 流式 Function Calling | 已实现 |
-| 文件读写（read_file / write_file / edit_file） | 已实现 |
+| 文件读写（read_file / write_file / edit_file）+ 最近访问（list_recent_files） | 已实现 |
 | 命令执行（run_command + 确认） | 已实现 |
 | 工具注册中心 | 已实现 |
 | 可观测性（obs / metrics） | 已实现 |
-| SQLite 会话存储 | 已实现 |
+| 会话存储 | 已实现（内存 dict + TTL，v2.4 换 SQLite） |
 | 澄清提问 ask_user | 规划中（v2.2） |
 | 文档处理（CSV/Excel/Word/md→HTML） | 规划中（v3.0） |
 | 结构化输出（JSON mode） | 规划中（v3.0） |
@@ -122,10 +127,10 @@ Web 端通过 WebSocket 对话，端点 `/api/chat/stream`；会话查询 `/api/
 ```
 app/
 ├── agent/            # ReAct 循环、事件、会话
-├── api/              # FastAPI 路由 + WebSocket
+├── api/              # FastAPI 路由（HTTP + SSE）
 ├── config/           # 配置加载 + schema
 ├── llm/              # OpenAI 兼容客户端
-├── store/            # SQLite 存储
+├── store/            # 会话存储（内存，v2.4 换 SQLite）
 ├── tools/            # 工具 + 注册中心
 ├── cli.py            # CLI 入口
 ├── main.py           # Web 入口
@@ -138,7 +143,7 @@ docs/                 # 计划、ADR、提交记录
 
 关键架构决策记录在 [docs/adr/](docs/adr/)，包括：
 
-- 为什么 WebSocket 而非 SSE
+- [为什么放弃 WebSocket 改 HTTP + SSE](docs/adr/0002-http-sse-over-websocket.md)（含选型错误复盘）
 - 为什么 sqlite-vec 而非 Chroma / pgvector
 - 为什么 runner 保持传输无关
 
