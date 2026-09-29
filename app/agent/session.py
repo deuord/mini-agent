@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 
@@ -8,6 +9,9 @@ class Session:
         self.messages:list[dict] = []
         # 回合断点:等确认/等回答时非空(见 plan 2.5);一个会话同时只有一个活跃回合,所以挂会话上就够
         self.pending:dict|None = None
+        # 同一会话同时只跑一个回合:并发的第二个请求在此排队(不是报错),否则两个回合会交错写 messages、
+        # 且后写的断点会覆盖前一个。锁同时保证下面 run_turn 里 start_len 回滚不会误删别人的消息
+        self.lock = asyncio.Lock()
         self.create_time = time.time()
         self.update_time = time.time()
 

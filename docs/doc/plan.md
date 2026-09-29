@@ -117,7 +117,7 @@ v2.0 新增 `app/tools/`(registry 注册中心 + 各工具模块,每个工具一
 - **store/session_store.py**:`SessionStore` 内存 dict + TTL;v2.4 SQLite 替换实现,对外接口不变(动机:内存态多 worker 进程不共享、重启丢历史;换实现不动调用方)
 - **llm/**:`openai_compat.chat_stream(messages, model, cfg) -> AsyncIterator[str]` 直读 config,不设抽象层/factory(单 provider)
 - **agent/events.py**:事件数据类型(chunk / done / error),runner 与 renderer 之间的唯一契约;v2 扩 tool_call / confirm_request / ask_user 事件(**confirm 与 ask_user 也是事件,不走回调**,见 2.5),v3 扩 plan
-- **agent/session.py**:`Session` 数据结构(messages, session_id, created_at, **pending 断点**);存储逻辑在 `store/session_store.py`,单例放 `agent/store.py`(被 api 路由引用)
+- **agent/session.py**:`Session` 数据结构(messages, session_id, created_at, **pending 断点**, **lock 会话锁**);存储逻辑在 `store/session_store.py`,单例放 `agent/store.py`(被 api 路由引用)
 - **agent/runner.py**:**传输无关**。`run_turn` 追加用户消息 → 跑 ReAct → `yield` 事件;需要用户输入时把断点写进 `session.pending` 并**结束本段**;`resume_turn` 从断点续跑。代码里不允许出现 `print` / 任何传输层调用
 - **cli.py**(v1.0):stdin 读入 → 调 runner → 消费事件打印(`flush=True` 或 rich);遇 `confirm_request` / `ask_user` → 读一行 → 调 `resume_turn`
 - **api/routes_chat.py**(v1.1):HTTP + SSE 两个端点(发消息 / 提交回答)→ 调**同一个 runner** → 事件转 SSE `data:` 推回
@@ -432,8 +432,11 @@ if c["name"] == "run_command":
 ### 断线与一致性(为什么必须处理)
 
 - **断在断点处**（等确认 / 等提问）→ 断点已在 `session.pending`,**可续**:重连后 `GET /api/sessions/{id}` 看到 `pending` → 重新弹框 → resume
-- **断在其他位置**（流式输出中 / 工具执行中）→ 本段回滚,用户需重发这条消息（`run_turn` 的 `except` 里 `del session.messages[start_len:]`）
+- **断在流式输出中** → **不回滚**:user 消息保留,那半截已经生成、已经显示给用户的正文落盘成一条 `assistant`（尾部加"（回复已中断）"标记）。**用户屏幕上看到的内容必须和历史一致**——回滚等于"说过的话凭空消失",读起来就是 bug（业界一致做法,见 ADR-0003）
+- **断在工具执行中** → 同样不回滚:已执行完的 tool 结果保留,还没拿到结果的那条 call 补占位结果（见下条）
 - **一致性兜底**:generator 被外部关闭时（`GeneratorExit`,比如前端断流）**不走** `except Exception`,所以 `finally` 里要补一次检查——本轮最后一条 `assistant(带 tool_calls)` 若还有未配对的 call,补一条 `tool` 占位结果（`"（中断，未执行）"`）,否则下次请求直接 400（见 2.7 第二坑）
+- **同一会话串行（v2.1 修正）**:`Session.lock`(`asyncio.Lock`)保证一个会话同时只跑一个回合——并发的第二个请求在锁上**排队**(不报错,等前一段流结束),`run_turn` / `resume_turn` 共用同一把锁。没有它,两个回合会交错写 `messages`,后写的断点还会覆盖前一个
+  - **锁只管串行,不做去重**:排队进来的重复提交(用户双击 / 前端重发)**会真的再跑一遍**,再花一次 token。真去重要靠前端带 `request_id` 服务端判重,排到 v3（前端一起做）；当前阶段接受这个边界
 
 ### 端到端形态(对照三家)
 
@@ -965,6 +968,7 @@ ADR 正文在 `docs/adr/`,plan 只留索引(避免两处维护):
 |---|---|---|
 | [0001](../adr/0001-core-architecture-decisions.md) | 核心架构决策:WebSocket 传输 / sqlite-vec 向量库 / runner 传输无关 | 决策 2、3 有效;决策 1 已废止 |
 | [0002](../adr/0002-http-sse-over-websocket.md) | Web 端改用 HTTP + SSE,废止 WebSocket(含选型错误复盘) | 已接受,取代 0001 决策 1 |
+| [0003](../adr/0003-persist-partial-on-interrupt.md) | 客户端中断后保留已生成的部分,不回滚 | 已接受,修正 2.5 原「本段回滚」设计 |
 
 **选型规则(由 ADR-0002 的教训沉淀)**:只有「服务端要推用户此刻没在等的消息」才需要长连接;方案里一出现「粘性会话 / 心跳 / 重连 / 多实例广播」,先回头查是不是把状态放错了地方。
 
