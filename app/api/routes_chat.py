@@ -22,9 +22,11 @@ class ChatRequest(BaseModel):
 
 class ResumeRequest(BaseModel):
     session_id: str
-    tool_call_id: str   # 关联键:对应哪个断点(见 plan 2.5)
-    kind: str           # confirm
-    approve: bool = False
+    tool_call_id: str
+    kind: str                    # confirm | ask_user
+    approve: bool = False        # confirm 用
+    status: str | None = None    # ask_user 用:answered | declined | cancelled | timeout
+    answer: str | None = None    # ask_user 用:用户回答内容
 
 
 def _sse(payload: dict) -> str:
@@ -48,6 +50,12 @@ def _payload(ev, session_id: str) -> dict:
         out["cwd"] = ev.cwd
     elif ev.type == "error":
         out["message"] = ev.message
+    elif ev.type == "ask_user":
+        out["step"] = ev.step
+        out["tool_call_id"] = ev.tool_call_id
+        out["question"] = ev.question
+        out["options"] = ev.options
+        out["timeout_seconds"] = ev.timeout_seconds
     return out
 
 
@@ -86,5 +94,7 @@ async def chat_resume(req: ResumeRequest):
         "tool_call_id": req.tool_call_id,
         "kind": req.kind,
         "approve": req.approve,
+        "status": req.status,
+        "answer": req.answer,
     }
     return _stream(session, resume_turn(session, answer))

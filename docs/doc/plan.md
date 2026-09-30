@@ -311,12 +311,14 @@ class AskUserEvent(BaseModel):
 - `read_file(path) -> content`
 - `write_file(path, content)`
 - `edit_file(path, old_str, new_str)` — 精确字符串替换
+- `list_dir(path=".")` — 列目录(只读、结构化、**免确认**);查看目录结构首选它。命令粒度的只读分级走"结构化工具 ＋ 严格白名单"两层(裸 startswith 前缀匹配会被 `ls;rm` 注入绕过,白名单用 shlex 分词+拒元字符),见 ADR-0004 决策7
 - `list_recent_files(limit=20)` — 查最近访问(方案 A 内存占位,做法见"最近访问记录")
 
 ### 命令执行
-- `run_command(cmd, cwd)` — 执行前**必须过确认**:runner 存断点并结束本段,用户在界面上点 y/n 后由 `resume_turn` 续跑(见 2.5),确认通过才执行
+- `run_command(cmd, cwd)` — 危险/写/复合命令执行前**必须过确认**:runner 存断点并结束本段,用户在界面上点 y/n 后由 `resume_turn` 续跑(见 2.5),确认通过才执行
+- **只读命令白名单自动放行**(免确认,`command.py: is_auto_approved`):只认"单条简单只读命令"——拒一切 shell 元字符(`;|&<>\`$()`/换行)、shlex 分词后程序名精确匹配只读集合(ls/cat/grep/find/head 等)、git 限只读子命令(status/log/diff/show/blame/ls-files)、find 禁 `-exec/-delete` 等;拿不准一律要确认(漏判不可接受、误伤可接受)。定位是减扰不是安全边界,沙箱以后做。31 条注入绕过用例已验证,见 ADR-0004 决策7
 - **执行超时 30s**（工具自己的超时,与"确认等待永不超时"是两件事）
-- 工作目录无限制,每次确认兜底
+- 工作目录无限制,非白名单命令每次确认兜底
 
 ### 澄清提问（ask_user）
 - `ask_user(question, options=None)` — Agent 在以下场景主动向用户提问：
@@ -649,6 +651,7 @@ async def _react(session, cfg, step_start, calls=None, call_start=0):
 - [x] 7. `GET /api/sessions/{id}` 历史响应加 `pending` 字段（断线重连后恢复现场）
 - [x] 8. `list_recent_files(limit=20)`:`tools/file.py` 模块级 deque(方案 A,内存占位;做法见 2.2 "最近访问记录"),read/write/edit 成功时记一条;SQLite 延后到 v2.4
 - [x] 9. confirm 交互埋点:等待时长 + approved/rejected 结果记入 metrics(见 1.6)
+- [x] 10. **只读操作免确认(两层)**:实测 `ls`/`git status` 每次确认过繁后增补——① `list_dir(path=".")` 结构化只读工具(`pathlib`,无 shell 注入);② `command.py: is_auto_approved()` 严格白名单(shlex 分词+拒元字符+精确程序名+git 只读子命令+find 危险参数,非 startswith;31 条绕过用例验证)。runner 拦截条件改为 `run_command and not 白名单`。定位是减扰不是安全边界,见 ADR-0004 决策7
 
 ### v2.2:澄清提问(ask_user)
 - [ ] 1. ask_user 工具定义 + runner 拦截分支（存断点,不调 registry.execute）

@@ -6,18 +6,22 @@ import time
 from ..config.loader import load_models
 from ..llm.openai_compat import chat_stream
 from ..obs import log_event
-from .events import ChunkEvent, ConfirmRequestEvent, DoneEvent, ErrorEvent, ToolCallEvent
+from .events import ChunkEvent, ConfirmRequestEvent, DoneEvent, ErrorEvent, ToolCallEvent, AskUserEvent
 from .session import Session
 from ..tools.calls import buffer_tool_calls, parse_tool_calls
 from ..tools.file import register as register_file
-from ..tools.command import register as register_command
+from ..tools.command import register as register_command, is_auto_approved
 from ..tools.registry import ToolRegistry
+from ..tools.ask_user import register as register_ask_user
 
 _registry = ToolRegistry()
 register_file(_registry)  #模块级注册一次：tools=definitions随请求发出
 register_command(_registry)  # 命令工具:执行前由 runner 存断点等用户确认(见 plan 2.5)
+register_ask_user(_registry)  # 澄清提问工具:向用户提问以澄清需求(见 plan 2.6)
 
-Event = ChunkEvent | DoneEvent | ErrorEvent | ToolCallEvent | ConfirmRequestEvent
+Event = ChunkEvent | DoneEvent | ErrorEvent | ToolCallEvent | ConfirmRequestEvent | AskUserEvent
+
+ASK_USER_TIMEOUT_SECONDS = 300   # 澄清提问默认超时(仅 Web/SSE 路径生效,CLI 不超时)
 
 def _tool_msg(tool_call_id:str,content) ->dict:
     # tool 结果必须带 tool_call_id,漏了直接 API 400(plan 第二坑)
@@ -53,16 +57,39 @@ async def _execute(c:dict) ->tuple[str,bool]:
 
 async def _resolve_answer(session:Session,p:dict,answer:dict) ->tuple[str,bool]:
     """把对断点的回答翻译成 tool 结果;顺带记一次人机交互埋点(等待时长+通过与否)"""
-    approved = answer.get("approve") is True
-    log_event(
-        "confirm",
-        session_id=session.session_id,
-        wait_seconds=round(time.time()-p["created_at"],1),
-        approved=approved,
-    )
-    if not approved:
-        return "用户拒绝执行该命令",True
-    return await _execute({"name":p["name"],"arguments":p["args"]})
+    kind = p["kind"]
+    waited = round(time.time()-p["created_at"],1)
+
+    if kind == "confirm":
+        approved = answer.get("approve") is True
+        log_event(
+            "confirm",
+            session_id=session.session_id,
+            wait_seconds=waited,
+            approved=approved,
+        )
+        if not approved:
+            return "用户拒绝执行该命令", True
+        return await _execute({"name": p["name"], "arguments": p["args"]})
+
+    # kind == "ask_user":四态(answered / declined / cancelled / timeout)
+    # 显式 status 一律信任:CLI 永远显式 answered(阻塞再久也不超时,ADR-0004 决策2);
+    # Web 端过期后由前端发 timeout(ADR 决策4 自动续跑)。仅在 status 缺失时后端惰性兜底判过期
+    status = answer.get("status")
+    if status is None:
+        expires = p.get("expires_at")
+        status = "timeout" if (expires is not None and time.time() > expires) else "answered"
+    log_event("ask_user", session_id=session.session_id, wait_seconds=waited, status=status)
+
+    if status == "answered":
+        return str(answer.get("answer", "")), True
+    if status == "declined":
+        return "用户拒绝回答此问题，请基于合理假设继续", True
+    if status == "cancelled":
+        return "用户取消了整个任务", True
+    # timeout
+    return f"用户超时未响应（已等待{ASK_USER_TIMEOUT_SECONDS//60}分钟），请基于合理假设继续，或中止任务等待用户回来", True
+
 
 def _log_turn(session:Session,t0:float,stats:dict,err:str|None) ->None:
     # 回合埋点:一次输入到结束的耗时/步数/工具成败/错误(断点恢复会分多段,每段各记一条)
@@ -135,6 +162,10 @@ async def resume_turn(
                 stats["tools_ok"] += 1
             session.messages.append(_tool_msg(p["tool_call_id"], result))
             yield ToolCallEvent(step=p["step"], name=p["name"], args=p["args"], result=result)
+            if answer.get("status") == "cancelled":
+                # 用户取消整个任务:tool 结果已补(历史合法),直接收尾(见 plan 2.6)
+                yield DoneEvent()
+                return
             async with aclosing(_react(
                 session, cfg, step_start=p["step"],
                 calls=p["calls"], call_start=p["call_index"] + 1, stats=stats,
@@ -184,8 +215,31 @@ async def _react(
                 call_start = 0
             for i in range(call_start, len(calls)): #执行本步的 tool_calls
                 c = calls[i]
-                if c["name"] == "run_command":
-                    # 命令类工具必须过确认:存断点并结束本段,绝不挂起等回答(结果由 resume_turn 补)
+                if c["name"] == "ask_user":
+                    # 澄清提问:与 confirm 同一套断点管道,只是 kind 不同、带超时
+                    session.pending = {
+                        "kind":"ask_user",
+                        "step":step,
+                        "call_index":i,
+                        "calls":calls,
+                        "tool_call_id":c["id"],
+                        "name":c["name"],
+                        "args":c["arguments"],
+                        "created_at":time.time(),
+                        "expires_at":time.time() + ASK_USER_TIMEOUT_SECONDS,  # 惰性判定,不用定时器
+                    }
+                    unpaired = []
+                    yield AskUserEvent(
+                        step=step,
+                        tool_call_id=c["id"],
+                        question=c["arguments"].get("question",""),
+                        options=c["arguments"].get("options") or [],
+                        timeout_seconds=ASK_USER_TIMEOUT_SECONDS,
+                    )
+                    return
+                if c["name"] == "run_command" and not is_auto_approved(c["arguments"].get("cmd", "")):
+                    # 非白名单只读命令必须过确认:存断点并结束本段,绝不挂起等回答(结果由 resume_turn 补)
+                    # 白名单(ls/git status 等单条只读命令)直接落到下面 _execute 免确认,见 ADR-0004 决策7
                     session.pending = {
                         "kind":"confirm",
                         "step":step,          #第几轮(1-based)

@@ -40,6 +40,18 @@ async def _render(session, events):
                 print(ev.content, end="", flush=True)
             elif ev.type == "tool_call":
                 print(f"\n[调用工具 #{ev.step}] {ev.name} 参数={json.dumps(ev.args, ensure_ascii=False)}")
+            elif ev.type == "ask_user":
+                print(f"\n[提问] {ev.question}")
+                if ev.options:
+                    for idx, opt in enumerate(ev.options, 1):
+                        print(f"  {idx}. {opt}")
+                pending = {
+                    "tool_call_id": ev.tool_call_id,
+                    "kind": "ask_user",
+                    "status": "answered",
+                    "answer": _ask_text(),          # ← CLI 不做超时(ADR-0004 决策2),只阻塞读一行
+                }
+                break  # 同 confirm:退出循环 → finally aclose 释放锁 → repl 调 resume_turn
             elif ev.type == "confirm_request":
                 print(f"\n执行命令? {ev.cmd} (cwd={ev.cwd})")
                 pending = {
@@ -68,6 +80,13 @@ def _ask_yn() -> bool:
             return line == "y"
         print("(只认 y/n,重新输入)", flush=True)
 
+
+def _ask_text() -> str:
+    try:
+        return input("回答：").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return "（用户未回答，请基于合理假设继续）"
 
 def main():
     asyncio.run(repl())

