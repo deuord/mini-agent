@@ -319,10 +319,15 @@ class AskUserEvent(BaseModel):
 - 工作目录无限制,每次确认兜底
 
 ### 澄清提问（ask_user）
-- `ask_user(question, options=None)` — Agent 遇到需求歧义 / 多方案决策 / 缺少关键信息时，主动向用户提问
+- `ask_user(question, options=None)` — Agent 在以下场景主动向用户提问：
+  - **需求歧义**：登录功能用账号密码 / 手机号 / OAuth？
+  - **多方案决策**：找到 3 个匹配文件，用哪个？
+  - **缺少关键信息**：你要处理哪个文件？（用户没说清路径）
+  - **错误恢复**：工具连续失败后求助用户（agent 决定要不要问，不是 runner 兜底）
 - **三态+超时响应**：`answered`（用户给出回答）/ `declined`（用户拒答，Agent 应用默认值继续）/ `cancelled`（用户取消整个任务）/ `timeout`（超时未响应，Agent 自行决策）
 - **超时控制**：可配置（默认 5 分钟），**惰性判定**（断点里存 `expires_at`，`resume_turn` 时比对当前时间，不用定时器；见 2.6）；超时后返回 `timeout` 状态，Agent 自行判断用默认值继续或中止
-- **防止滥用**：系统 prompt 限制最多问 2-3 个问题，要求先充分检索上下文再提问，避免挤牙膏式追问
+- **防止滥用**：系统 prompt 限制最多问 2-3 个问题，要求先充分检索上下文再提问，避免挤牙膏式追问；同时引导"连续 2 次同工具失败后再考虑 ask_user 问用户怎么处理"（不是 runner 自动兜底——是否问由 LLM 决策）
+- **多 ask_user 串行约定**：一段只问一个，答完 agent 再决定下一个问不问（多回合 ReAct）。不要一次返回多个 ask_user calls 让前端批量弹——LLM 看到 P1 答案后可能改变 P2 的问法甚至取消 P2。当前 runner 实现天然就是这套（一个 ask_user 就 yield return 结束本段，见 2.6）
 - 执行路径特殊：与普通工具不同，`ask_user` 不直接执行，由 runner 层拦截后**存断点并结束本段**，等外部输入后由 `resume_turn` 续跑
 
 ### 最近访问记录
@@ -495,6 +500,12 @@ Agent 在 ReAct 循环中遇到需求歧义、多方案选择、缺少关键信�
 - `GET /api/sessions/{id}` 也回报 `pending` 是否已过期,前端据此不再弹框
 - 不需要后台扫描任务、不需要 `asyncio.wait_for`、不占用内存——这是"断点落库"白拿的好处
 
+**超时后续跑路径（选 A：自动续跑，业界更主流；落地放 v3.2 前端）**：
+- A. **自动续跑**（OpenAI Assistants `Run.expired` / LangGraph checkpointer 超时 commit 都走这套）：前端在 `GET /api/sessions/{id}` 检测到 `pending` 已过期时，**自动发一次 `POST /api/chat/resume`（status=timeout）**让 agent 续跑——agent 收到 timeout 后自行决定用默认值继续或中止。用户回来看到的是结果而不是卡住的弹框
+- B. **等用户发新消息**（Claude Code / Cursor / Codex CLI 走这套）：超时后 pending 标记过期但不动 agent；用户回来必须发新消息，agent 才会把 timeout 结果落历史再起新回合
+- 选 A 的理由：B 要求用户明白"我得发条消息激活"，认知负担重；A 让用户回来看到的是已结束的结果，体验更顺
+- 落地时序：超时判定 + resume API 已就位（v2.2），**自动续跑的触发方在前端**（v3.2 前端拉到过期 pending 时自动 POST）。v2 阶段（无前端）接受"超时后僵住"的边界，靠 curl 手动 resume 验证
+
 **⚠️ `cancelled` 也必须写 tool 结果**：直接结束会留下 `assistant(带 tool_calls)` 没有配对 `tool` 消息的历史，下次请求直接 400（见 2.7 第二坑）。所以取消也要先 append 一条 `"用户取消了整个任务"`。
 
 **Runner 拦截机制**：
@@ -642,7 +653,7 @@ async def _react(session, cfg, step_start, calls=None, call_start=0):
 ### v2.2:澄清提问(ask_user)
 - [ ] 1. ask_user 工具定义 + runner 拦截分支（存断点,不调 registry.execute）
 - [ ] 2. SSE 扩展:`ask_user` 事件 + `POST /api/chat/resume` 支持 `kind: "ask_user"` 三态 + **惰性超时**（`expires_at`,不用定时器）
-- [ ] 3. CLI 侧:ask_user 终端交互 + 超时（同样惰性判定）
+- [ ] 3. CLI 侧:ask_user 终端交互（**CLI 不实现超时**，等同 confirm 永不超时——业界共识，CLI 是阻塞 `input()` 一问一答，强加超时要开后台线程 + 信号打断，复杂度不值；超时只在 Web/SSE 路径有效，惰性判定 `expires_at`）
 - [ ] 4. 系统 prompt:引导 Agent 合理使用 ask_user（先查再问、最多 2-3 个、避免挤牙膏）
 - [ ] 5. ask_user 交互埋点:等待时长 + answered/declined/cancelled/timeout 分布记入 metrics(见 1.6)
 
@@ -705,6 +716,13 @@ async def _react(session, cfg, step_start, calls=None, call_start=0):
 - `move_file(src, dst)` — 移动/重命名文件，支持批量（src 可传 glob 模式）
 - `make_dir(path)` — 创建目录（含父目录，等价 `mkdir -p`）
 - 都加在已有的 `tools/file.py` 里，不新建文件
+
+**⚠️ 危险工具扩展机制（v3 同步落地，避免硬编码 if 蔓延）**：
+- v2 的 `if c["name"] == "run_command"` 硬编码拦截在 v3 加 `move_file`（批量）时就不能再用了——新增危险工具（move_file / 未来 delete_file / network_request / send_email）都得改 runner 的 if 分支，违反"工具自包含"原则，业界反模式
+- **业界主流**：工具 schema 声明 `requires_confirmation`（或 `danger_level: "safe"|"confirm"|"destructive"`），runner 看 schema 字段决定是否拦截——Cursor / Claude Computer Use / OpenAI Functions 都走这套
+- **v3 改造**：`tools/registry.py` 工具 schema 加 `requires_confirmation: bool`（默认 false），注册时声明；runner 把 `if c["name"] == "run_command"` 改成 `if _registry.needs_confirm(c["name"])`，`run_command` / `move_file` 等危险工具各自在 schema 里声明 `requires_confirmation: true`
+- **当前 v2 不动**：只有 `run_command` 一个危险工具，硬编码 if 反而清晰（plan §2.6 自己说了"不引入额外抽象"）。本节是 v3 的预告，避免到时候又随手加 `if c["name"] == "move_file"`
+- 详见 ADR-0004 边界 1
 
 ### ② 规划能力
 - 任务规划 prompt 模板(系统提示引导先列步骤再执行)
@@ -824,6 +842,10 @@ app/
 ### 并发工具调用(v4.3,可裁剪)
 - 同一轮多个互不依赖的 tool_calls 用 `asyncio.gather` 并行执行
 - 有依赖的仍串行;此能力对三个验收场景无刚需,时间紧可裁剪,不影响主线
+- **⚠️ ask_user / confirm 类工具不参与并发**（业界共识：交互工具独占串行，见 ADR-0004 边界 3）：
+  - 执行批次前先扫一遍 calls，遇到 ask_user / 需要确认的工具就**单独 yield return 处理**（走 v2 的断点模型），其余纯计算工具才 `asyncio.gather`
+  - 理由：一个会话同时只能挂一个 pending（§2.5），并行两个 ask_user 会让第二个 call_index 错位、pending 互相覆盖；LangGraph `interrupt` 暂停整个 graph、AutoGen "Human in the loop" 工具 `is_async=False`、OpenAI Swarm handoff 强制串行——都是这套
+  - 实现：在 `_react` 执行 tool_calls 前加一步"分桶"——`interactive_calls` 串行 + `compute_calls` 并行；当前 v2 是顺序执行，v4.3 改造时只动 compute_calls 那批
 
 ### 长期记忆(v4.4)
 - 用户偏好 / 历史决策(如"以后输出都用中文""命令默认确认")向量化存 sqlite-vec,跨 session 持久
@@ -997,6 +1019,7 @@ ADR 正文在 `docs/adr/`,plan 只留索引(避免两处维护):
 | [0001](../adr/0001-core-architecture-decisions.md) | 核心架构决策:WebSocket 传输 / sqlite-vec 向量库 / runner 传输无关 | 决策 2、3 有效;决策 1 已废止 |
 | [0002](../adr/0002-http-sse-over-websocket.md) | Web 端改用 HTTP + SSE,废止 WebSocket(含选型错误复盘) | 已接受,取代 0001 决策 1 |
 | [0003](../adr/0003-persist-partial-on-interrupt.md) | 客户端中断后保留已生成的部分,不回滚 | 已接受,修正 2.5 原「本段回滚」设计 |
+| [0004](../adr/0004-human-interaction-hybrid-pattern.md) | 人机交互采用混合方案（方案 C）+ 6 个边界决策 | 已接受（落地中：权限半边已实现，澄清半边 v2.2） |
 
 **选型规则(由 ADR-0002 的教训沉淀)**:只有「服务端要推用户此刻没在等的消息」才需要长连接;方案里一出现「粘性会话 / 心跳 / 重连 / 多实例广播」,先回头查是不是把状态放错了地方。
 
