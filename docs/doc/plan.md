@@ -241,7 +241,7 @@ class AskUserEvent(BaseModel):
 
 - **token 计数**:OpenAI 协议流式默认不回 usage,要带 `stream_options={"include_usage": True}`,末尾 chunk 里取(DeepSeek 兼容)
 - **聚合端点** `GET /api/metrics`:会话数、回合数、tool_call 数、错误数、LLM 累计 token、平均延迟(v2.4 接入)
-- **v1 缺口(已在 v2.0 补上)**:chat_stream 的耗时/token 记录已接入 log_event(tools 参数 / delta yield / usage 拿取残局同步修完);遗留项是 `app/chat.py`(非流式 + 自带 print)已无任何引用,属死代码,待清理
+- **v1 缺口(已在 v2.0 补上)**:chat_stream 的耗时/token 记录已接入 log_event(tools 参数 / delta yield / usage 拿取残局同步修完);遗留项 `app/chat.py`(非流式 + 自带 print、无任何引用)已于 v2.4 删除清理
 - **调试收益**:ReAct 多步出问题时,jsonl 直接 grep 出每步耗时与成败;**简历表述**:"设计 LLM 应用全链路可观测性:结构化指标日志 + 聚合端点,量化 token 成本、回合延迟、工具调用成功率、人机交互等待时长"
 
 ## 1.7 任务清单
@@ -372,8 +372,8 @@ app/
 CREATE TABLE recent_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL,
-    op TEXT NOT NULL,           -- read / write / edit
-    accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    op TEXT NOT NULL,               -- read / write / edit
+    accessed_at REAL NOT NULL       -- epoch 秒(代码显式插入);不用 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,那个存 UTC 字符串转本地会差 8 小时
 );
 CREATE INDEX idx_recent_files_accessed ON recent_files(accessed_at DESC);
 ```

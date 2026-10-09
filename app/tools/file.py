@@ -1,13 +1,20 @@
-from collections import deque
 from pathlib import Path
 import time
 from app.tools.registry import ToolRegistry
+from app.store.db import get_conn
 
-_recent: deque[dict] = deque(maxlen=200)  #最近访问记录(方案 A 内存占位,重启即空;v2.4 换 SQLite,见 plan 2.2)
-
-def _record(op:str,path:str)->None:
+def _record(op:str,path) -> None:
     # 只在工具执行成功时调用;不去重,同一文件多次访问就是多条
-    _recent.append({"path":str(path),"op":op,"at":time.time()})
+    # accessed_at 显式插 epoch 秒:不用 DEFAULT 那个 UTC 时间戳,显示转本地才不差 8 小时
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO recent_files (path, op, accessed_at) VALUES (?, ?, ?)",
+            (str(path), op, time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()   # 独立连接纪律:谁开谁关,漏了就是泄漏
 
 def read_file(path:Path)->str:
     text = Path(path).read_text(encoding="utf-8")
@@ -34,14 +41,23 @@ def edit_file(path:str,old_str:str,new_str:str)->str:
     return f"已替换文件{path}里的目标文本（1处）"
 
 def list_recent_files(limit:int = 20)->str:
-    if not _recent:
+    # ORDER BY accessed_at DESC 正好吃上 plan 2.4 建的索引
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT path, op, accessed_at FROM recent_files ORDER BY accessed_at DESC LIMIT ?",
+            (max(1, limit),),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
         return "暂无最近访问记录"
-    items = list(_recent)[::-1][:max(1,limit)]  #deque 尾部最新,倒序取前 limit 条
     lines = [
-        f"{i+1}. [{r['op']}] {r['path']}  ({time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(r['at']))})"
-        for i,r in enumerate(items)
+        f"{i+1}. [{r['op']}] {r['path']}  ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r['accessed_at']))})"
+        for i, r in enumerate(rows)
     ]
-    return f"最近访问（{len(items)} 条,最新在前）:\n" + "\n".join(lines)
+    return f"最近访问（{len(rows)} 条,最新在前）:\n" + "\n".join(lines)
+
 
 def list_dir(path:str = ".")->str:
     # 只读列目录:结构化、不经过 shell,所以 runner 不拦截、无需用户确认

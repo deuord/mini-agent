@@ -3,10 +3,12 @@ import asyncio
 import json
 from app.agent.runner import run_turn, resume_turn
 from app.store.session_store import SessionStore
+from app.store.db import init_db
 
 
 async def repl():
     store = SessionStore()
+    init_db()  # 启动即建表(幂等)
     session = store.create()
     print("mini-agent v1.0 — 输入 exit 退出\n")
 

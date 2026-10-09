@@ -2,7 +2,9 @@ from fastapi import FastAPI
 from app.api.routes_health import router as health_router
 from app.api.routes_chat import router as chat_router
 from app.api.routes_sessions import router as sessions_router
+from app.store.db import init_db
 
+init_db()  # 启动即建表(幂等)
 
 app = FastAPI(title="mini-agent")
 app.include_router(health_router)
