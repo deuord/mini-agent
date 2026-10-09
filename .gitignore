@@ -14,6 +14,9 @@ configs/models.yaml
 # 指标日志
 logs/
 
+# SQLite 数据文件
+data/
+
 # macOS 系统垃圾文件
 .DS_Store
 

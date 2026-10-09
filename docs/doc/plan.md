@@ -661,10 +661,13 @@ async def _react(session, cfg, step_start, calls=None, call_start=0):
 - [ ] 5. ask_user 交互埋点:等待时长 + answered/declined/cancelled/timeout 分布记入 metrics(见 1.6)
 
 ### v2.3:多步串联
-- [ ] 1. 联调:2.9 多步串联验收（`curl -N` 看 SSE;三场景需要 v3 工具,留到 v3.3）
+- [x] 1. 联调:2.9 多步串联验收（`curl -N` 看 SSE;三场景需要 v3 工具,留到 v3.3）
+  - 实测(session d9a639a5e01b):`读 testbed/a.md → 改 foo→bar → 跑 python testbed/test.py 验证` → 第一段 read_file→edit_file→**list_dir(白名单免确认)**→到 `python testbed/test.py` 停下 confirm;`POST /api/chat/resume` 批准 → run_command exit=0「验证通过」→ done。SSE 事件序列 session/chunk/tool_call×3/confirm_request → tool_call/done 完整;metrics 有 4 条 llm + 2 条 turn(step 3/4,各段各记)+1 条 confirm(approved,wait 4.2s)
 
 ### v2.4:收尾
-- [ ] 1. SQLite 初始化 + recent_files 落库(替换内存占位) + Session 历史与**断点**落库(重启不丢,断点可续)
+- [x] 1a. `store/db.py` 骨架:SQLite 连接(每次操作独立连接,配合 `to_thread`)+ `recent_files` 建表(幂等);文件 `data/mini-agent.db`,已加 .gitignore。暂未接调用方
+- [ ] 1b. recent_files 落库:`file.py` 的 `deque` 换成 SQLite 读写(工具契约/description 不变)
+- [ ] 1c. Session 历史 + **断点**落库(重启不丢,断点可续):messages/pending 序列化进 SQL,TTL 进 SQL,append 写库
 - [ ] 2. `GET /api/metrics`:聚合内存计数(会话数、回合数、tool_call 数、错误数、LLM 累计 token、平均延迟) + jsonl 落地检查
 - [ ] 3. 模型切换后端透传:Session 加 model 字段 + run_turn 透传 model 给 chat_stream(与 Cursor/Trae 一致,方案见 2.2)
 - [ ] 4. 流式取消端到端验证:CLI Ctrl+C + SSE abort fetch 两条路径跑通(保半截正文、补 tool 占位都生效,见 2.2 / 2.7);能力已随 SSE 天然具备,不额外加 API
