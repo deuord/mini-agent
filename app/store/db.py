@@ -11,10 +11,23 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS recent_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL,
-    op TEXT NOT NULL,               -- read / write / edit
-    accessed_at REAL NOT NULL       -- epoch 秒,由 file._record 显式插入;不用 DEFAULT CURRENT_TIMESTAMP(它存 UTC 字符串,转本地会差 8 小时)
+    op TEXT NOT NULL,           -- read / write / edit
+    accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_recent_files_accessed ON recent_files(accessed_at DESC);
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    create_time REAL NOT NULL,
+    update_time REAL NOT NULL,    -- TTL 判定用;append/断点活动都会刷新
+    pending_json TEXT             -- 断点JSON,NULL=没有断点;见 plan 2.5
+);
+CREATE TABLE IF NOT EXISTS messages (
+    session_id TEXT NOT NULL,
+    idx INTEGER NOT NULL,         -- 消息序号,恢复时按它排回原顺序
+    role TEXT NOT NULL,
+    content TEXT,
+    PRIMARY KEY (session_id, idx)
+);
 """
 
 
