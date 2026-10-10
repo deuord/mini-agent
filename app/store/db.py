@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS recent_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL,
     op TEXT NOT NULL,           -- read / write / edit
-    accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    accessed_at REAL NOT NULL        -- time.time() 的 epoch 秒;不用 CURRENT_TIMESTAMP,它存 UTC 文本、本地读会差 8 小时
 );
 CREATE INDEX IF NOT EXISTS idx_recent_files_accessed ON recent_files(accessed_at DESC);
 CREATE TABLE IF NOT EXISTS sessions (
@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS messages (
     idx INTEGER NOT NULL,         -- 消息序号,恢复时按它排回原顺序
     role TEXT NOT NULL,
     content TEXT,
+    tool_calls_json TEXT,        -- assistant 消息的 tool_calls(JSON);缺了恢复后下一轮 LLM 400
+    tool_call_id TEXT,           -- tool 消息的配对键;缺了同样 400
     PRIMARY KEY (session_id, idx)
 );
 """
